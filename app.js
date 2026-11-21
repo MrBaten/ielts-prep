@@ -252,6 +252,19 @@
     return { key: best.key, name: sk[1], tab: sk[2], band: best.band };
   }
   function drills() { var d = get("drills"); return (d && d.list) || []; }
+  function drillBank() { var b = get("drillbank"); return ((b && b.list) || []).slice().reverse(); }
+  function saveToBank(d) {
+    var b = get("drillbank"), list = ((b && b.list) || []).slice();
+    var id = uid(); list.push({ id: id, date: today(), data: d, score: null, total: (d.questions || []).length });
+    while (list.length > 20) list.shift();
+    put("drillbank", { list: list, updated: new Date().toISOString() });
+    return id;
+  }
+  function markBank(id, score) {
+    var b = get("drillbank"); if (!b || !b.list) return;
+    var list = b.list.map(function (x) { return x.id === id ? Object.assign({}, x, { score: score }) : x; });
+    put("drillbank", { list: list, updated: new Date().toISOString() });
+  }
   function addDrill(entry) {
     var list = drills().concat([entry]); if (list.length > 300) list = list.slice(-300);
     put("drills", { list: list, updated: new Date().toISOString() });
@@ -260,6 +273,94 @@
   // ================= Claude capabilities =================
   var AI = null, TTS = null, DICT = null, ttsOff = false;
   var dictState = "idle";
+
+  // ---------- AI through your own API key (installed app outside Claude) ----------
+  var KEY_LS = "ielts-ai-key";
+  function keyCfg() { try { var c = JSON.parse(localStorage.getItem(KEY_LS) || "null"); return c && c.key ? c : null; } catch (e) { return null; } }
+  function parseJsonLoose(t) {
+    t = String(t || "").trim();
+    try { return JSON.parse(t); } catch (e) {}
+    var f = t.match(/```(?:json)?\s*([\s\S]*?)```/); if (f) { try { return JSON.parse(f[1]); } catch (e) {} }
+    var a = t.search(/[\[{]/), b = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+    if (a !== -1 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) {} }
+    return undefined;
+  }
+  function httpErr(s) { return { code: s === 401 || s === 403 ? "bad_key" : s === 402 ? "no_credit" : s === 429 ? "rate_limited" : "upstream_error" }; }
+  function makeKeyAI(cfg) {
+    async function json(prompt, opts) {
+      opts = opts || {};
+      if (!navigator.onLine) throw { code: "offline" };
+      var quick = opts.modelTier === "quick", text = "";
+      var full = prompt + "\n\nReply with only the JSON value, with no other text.";
+      try {
+        if (cfg.provider === "anthropic") {
+          var r = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST", signal: opts.signal,
+            headers: { "x-api-key": cfg.key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-dangerous-direct-browser-access": "true" },
+            body: JSON.stringify({ model: quick ? "claude-haiku-5-5" : "claude-sonnet-5-5", max_tokens: 8000, messages: [{ role: "user", content: full }] })
+          });
+          if (!r.ok) throw httpErr(r.status);
+          var d = await r.json();
+          text = (d.content || []).filter(function (b) { return b.type === "text"; }).map(function (b) { return b.text; }).join("");
+        } else {
+          var r2 = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST", signal: opts.signal,
+            headers: { "Authorization": "Bearer " + cfg.key, "content-type": "application/json", "HTTP-Referer": location.origin, "X-Title": "IELTS Prep Tracker" },
+            body: JSON.stringify({ model: quick ? "anthropic/claude-haiku-5.5" : "anthropic/claude-sonnet-5.5", max_tokens: 8000, messages: [{ role: "user", content: full }] })
+          });
+          if (!r2.ok) throw httpErr(r2.status);
+          var d2 = await r2.json();
+          text = (d2.choices && d2.choices[0] && d2.choices[0].message && d2.choices[0].message.content) || "";
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") throw { code: "cancelled" };
+        if (e && e.code) throw e;
+        throw { code: navigator.onLine ? "network" : "offline" };
+      }
+      var v = parseJsonLoose(text);
+      if (v === undefined) throw { code: "invalid_json" };
+      return v;
+    }
+    return { json: json, keyBased: true };
+  }
+  function aiReady() { return !!AI && (!AI.keyBased || navigator.onLine); }
+
+  // speech-to-text through the browser (installed app; needs internet on most phones)
+  function makeWebSpeech() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) return null;
+    var rec = null, state = "idle", hf = [], hp = [], hs = [];
+    function setState(s, reason) { state = s; hs.forEach(function (h) { h({ state: s, reason: reason }); }); }
+    return {
+      webSpeech: true,
+      start: function () {
+        return new Promise(function (res, rej) {
+          try {
+            rec = new SR(); rec.lang = "en-GB"; rec.continuous = true; rec.interimResults = true;
+            rec.onstart = function () { setState("listening"); res(); };
+            rec.onresult = function (e) {
+              var interim = "";
+              for (var i = e.resultIndex; i < e.results.length; i++) {
+                var r = e.results[i];
+                if (r.isFinal) { var t = r[0].transcript.trim(); if (t) hf.forEach(function (h) { h({ text: " " + t }); }); }
+                else interim += r[0].transcript;
+              }
+              hp.forEach(function (h) { h({ text: interim }); });
+            };
+            rec.onerror = function (e) {
+              var c = (e.error === "not-allowed" || e.error === "service-not-allowed") ? "not_granted" : (e.error === "network" ? "network" : "upstream_error");
+              if (state === "starting") rej({ code: c });
+              setState("idle", c);
+            };
+            rec.onend = function () { hp.forEach(function (h) { h({ text: "" }); }); if (state !== "idle") setState("idle", "stopped"); };
+            setState("starting"); rec.start();
+          } catch (e) { setState("idle", "upstream_error"); rej({ code: "unavailable" }); }
+        });
+      },
+      stop: function () { try { if (rec) rec.stop(); } catch (e) {} return Promise.resolve(); },
+      active: function () { return state !== "idle"; },
+      onFinal: function (h) { hf.push(h); }, onPartial: function (h) { hp.push(h); }, onState: function (h) { hs.push(h); }
+    };
+  }
 
   function aiErrMsg(e) {
     var code = e && e.code;
@@ -274,12 +375,17 @@
       empty_completion: "The AI gave an empty answer. Please try again.",
       session_expired: "Please sign in to Claude again.",
       prompt_too_large: "That text is too long to send. Try a shorter piece.",
-      not_available: "AI features need this page open in Claude while signed in."
+      not_available: "AI features need the Claude version, or an API key in Progress → AI settings.",
+      offline: "You’re offline. AI features work again when you’re back online.",
+      bad_key: "Your API key was rejected. Check it in Progress → AI settings.",
+      no_credit: "Your API account has run out of credit.",
+      network: "Couldn’t reach the AI service. Check your internet connection."
     };
     return code in m ? m[code] : "Something went wrong with the AI request. Please try again.";
   }
   async function aiCall(key, prompt, tier) {
     if (!AI) throw { code: "not_available" };
+    if (!aiReady()) throw { code: "offline" };
     var ctl = new AbortController();
     ui.busy = { key: key, ctl: ctl }; render();
     try {
@@ -294,7 +400,10 @@
     return '<div class="thinking"><span>Claude is thinking<span class="dots"></span> this can take up to a minute.</span><button class="btn ghost small" data-act="stopAi">Stop</button></div>';
   }
   function aiNote() {
-    return AI ? "" : '<p class="note">AI features (marking, feedback, new drills) switch on when this page is open in Claude and you allow it.</p>';
+    if (aiReady()) return "";
+    if (window.claude) return '<p class="note">AI features (marking, feedback, new drills) switch on when you allow Claude for this page.</p>';
+    if (AI && !navigator.onLine) return '<p class="note">You’re offline: AI features come back when you’re online. Everything else works.</p>';
+    return '<p class="note">AI features (marking, feedback, new drills): add an API key in <a href="#progress">Progress → AI settings</a>, or use the Claude version.</p>';
   }
 
   function canSay() { return !ttsOff && (TTS || ("speechSynthesis" in window)); }
@@ -536,7 +645,7 @@
     var c = ui.cards, s = srs(), cards = deckCards(c.deck), a = c.add;
     var h = '<section class="card"><div class="row between"><button class="textbtn" data-act="cardsHome">← Flashcards</button><span class="note">' + esc(deckName(c.deck)) + '</span></div>';
     h += '<h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
-    if (AI) h += '<button class="btn ghost" data-act="addFill"' + (ui.busy ? " disabled" : "") + '>Fill with AI</button>';
+    if (aiReady()) h += '<button class="btn ghost" data-act="addFill"' + (ui.busy ? " disabled" : "") + '>Fill with AI</button>';
     h += '</div>' + busyBlock("addFill");
     if (a.w || a.def) {
       h += '<div class="grid2"><label class="field">Part of speech<input type="text" data-in="add_pos" value="' + esc(a.pos) + '"></label><label class="field">Deck<select data-ch="add_topic">';
@@ -712,14 +821,14 @@
     var p = currentWritePrompt();
     var h = '<section class="card"><div class="row between"><h2>Writing</h2><div class="seg" style="min-width:180px"><button data-act="wTask" data-n="1" aria-pressed="' + (w.task === 1) + '">Task 1<span>20 min</span></button><button data-act="wTask" data-n="2" aria-pressed="' + (w.task === 2) + '">Task 2<span>40 min</span></button></div></div>';
     h += '<span class="chip quiet" style="justify-self:start">' + esc(D.TYPE_NAMES[p.type] || "Task " + p.task) + '</span><div class="prompt">' + esc(p.q) + '</div>' + tableHtml(p);
-    h += '<div class="row"><button class="btn ghost small" data-act="nextPrompt">Another question</button>' + (AI ? '<button class="btn ghost small" data-act="aiPrompt"' + (ui.busy ? " disabled" : "") + '>New question with AI</button>' : "") + '<button class="btn ghost small" data-act="togglePlan">' + (w.plan ? "Hide" : "Show") + ' plan</button></div>' + busyBlock("aiPrompt");
+    h += '<div class="row"><button class="btn ghost small" data-act="nextPrompt">Another question</button>' + (aiReady() ? '<button class="btn ghost small" data-act="aiPrompt"' + (ui.busy ? " disabled" : "") + '>New question with AI</button>' : "") + '<button class="btn ghost small" data-act="togglePlan">' + (w.plan ? "Hide" : "Show") + ' plan</button></div>' + busyBlock("aiPrompt");
     if (w.plan) h += '<ol class="plan">' + (D.PLANS[p.type] || D.PLANS.opinion).map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") + '</ol>';
     h += '</section>';
 
     h += '<section class="card"><div class="row between"><span data-timer="write" class="timer">40:00</span><div class="row"><button class="btn ghost small" data-act="wTimer" data-op="start">Start</button><button class="btn ghost small" data-act="wTimer" data-op="pause">Pause</button><button class="btn ghost small" data-act="wTimer" data-op="reset">Reset</button></div></div>';
     h += '<textarea class="essay" id="essayBox" data-in="essay" placeholder="Write your answer here. Plan for 3–5 minutes first." aria-label="Your answer">' + esc(w.text) + '</textarea>';
     h += '<div class="stats" id="essayStats">' + statsHtml(w.text, w.task) + '</div>';
-    if (AI) h += '<button class="btn wide" data-act="grade"' + (ui.busy ? " disabled" : "") + '>Mark my answer (AI band estimate)</button>';
+    if (aiReady()) h += '<button class="btn wide" data-act="grade"' + (ui.busy ? " disabled" : "") + '>Mark my answer (AI band estimate)</button>';
     h += busyBlock("grade") + '<div class="grid2"><button class="btn ghost" data-act="saveEssay">Save without marking</button><button class="btn ghost" data-act="newEssay">Start a new answer</button></div>' + aiNote() + '</section>';
     if (w.result) h += '<section class="card"><h2>Feedback</h2>' + resultHtml(w.result, "essay") + '</section>';
 
@@ -781,7 +890,7 @@
     h += '<div class="partial" id="partial">' + esc(sp.partial) + '</div><textarea rows="7" id="speakText" data-in="speakText" placeholder="Your spoken answer appears here" aria-label="Your spoken answer">' + esc(sp.text) + '</textarea>';
     var secs = speakSecs(), stt = textStats(sp.text);
     h += '<div class="stats" id="speakStats">' + speakStatsHtml(stt, secs) + '</div>';
-    if (AI) h += '<button class="btn wide" data-act="speakFeedback"' + (ui.busy ? " disabled" : "") + '>Get feedback (AI band estimate)</button>';
+    if (aiReady()) h += '<button class="btn wide" data-act="speakFeedback"' + (ui.busy ? " disabled" : "") + '>Get feedback (AI band estimate)</button>';
     h += busyBlock("speakFeedback") + '<div class="grid2"><button class="btn ghost" data-act="saveSpeak">Save session</button><button class="btn ghost" data-act="newSpeak">Clear</button></div>' + aiNote() + '</section>';
     if (sp.result) h += '<section class="card"><h2>Feedback</h2>' + resultHtml(sp.result, "speak") + '</section>';
 
@@ -817,10 +926,16 @@
       h += '<label class="field">Section<select data-ch="ltype">' + LTYPES.map(function (t) { return '<option' + (t === p.ltype ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label><label class="choice"><input type="checkbox" data-ch="exam"' + (p.exam ? " checked" : "") + '> Exam mode: play the recording once only</label>';
     }
     h += '<label class="field">Topic (optional)<input type="text" data-in="ptopic" value="' + esc(p.topic) + '" placeholder="e.g. urban farming, sleep science, a museum tour"></label>';
-    if (AI) h += '<button class="btn wide" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Create a new ' + p.kind + ' drill</button>';
-    else h += '<p class="note">Drills are written fresh by Claude each time, so they need AI features. Open this page in Claude while signed in and allow AI.</p>';
+    if (aiReady()) h += '<button class="btn wide" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Create a new ' + p.kind + ' drill</button><p class="note">Every new drill is also saved below, so you can practise it later offline.</p>';
+    else h += aiNote();
     h += busyBlock("genDrill") + '</section>';
     if (p.data && p.data.kind === p.kind) h += p.kind === "reading" ? readingHtml() : listeningHtml();
+    var bank = drillBank().filter(function (b) { return b.data.kind === p.kind; });
+    if (bank.length) {
+      h += '<section class="card"><h2>Saved ' + p.kind + ' drills (' + bank.length + ')</h2><p class="note">These work offline. Generate a few while you have internet, then practise on the bus.</p><div class="hist">';
+      bank.forEach(function (b) { h += '<button data-act="openDrill" data-id="' + esc(b.id) + '"><span class="chip ' + (b.score != null ? "" : "quiet") + '">' + (b.score != null ? b.score + "/" + b.total : "new") + '</span><span class="grow">' + esc(b.data.title) + '</span><span class="note">' + esc(short(b.date)) + '</span></button>'; });
+      h += '</div></section>';
+    }
     h += drillStatsHtml();
     return h;
   }
@@ -948,6 +1063,16 @@
     h += '<label class="field">Target band<select data-ch="set_target">' + [6, 6.5, 7, 7.5, 8].map(function (b) { return '<option value="' + b + '"' + (+st.target === b ? " selected" : "") + '>' + band(b) + '</option>'; }).join("") + '</select></label>';
     h += '<label class="field">Stretch goal<select data-ch="set_stretch">' + [6.5, 7, 7.5, 8, 8.5].map(function (b) { return '<option value="' + b + '"' + (+st.stretch === b ? " selected" : "") + '>' + band(b) + '</option>'; }).join("") + '</select></label>';
     h += '<label class="field">New flashcards per day<select data-ch="set_new">' + [5, 10, 15, 20, 30].map(function (b) { return '<option value="' + b + '"' + (+st.newPerDay === b ? " selected" : "") + '>' + b + '</option>'; }).join("") + '</select></label></div><p class="note">After the exam date, the Today routine switches to application tasks.</p></section>';
+
+    // AI settings (installed app only)
+    if (!window.claude) {
+      var kc = keyCfg(), af = pr.ai || (pr.ai = { provider: (kc && kc.provider) || "openrouter", key: "" });
+      h += '<section class="card"><h2>AI settings (online)</h2><p class="note">' + (kc ? (navigator.onLine ? "AI is on: " : "AI is set up but you’re offline: ") + (kc.provider === "anthropic" ? "Anthropic" : "OpenRouter") + " key ending " + esc(kc.key.slice(-4)) + "." : "Add an API key to use essay marking, speaking feedback and new drills in this app when you’re online.") + '</p>';
+      h += '<div class="grid2"><label class="field">Provider<select data-ch="ai_provider"><option value="openrouter"' + (af.provider === "openrouter" ? " selected" : "") + '>OpenRouter</option><option value="anthropic"' + (af.provider === "anthropic" ? " selected" : "") + '>Anthropic (Claude API)</option></select></label><span></span></div>';
+      h += '<label class="field">API key<input type="password" autocomplete="off" data-in="ai_key" value="' + esc(af.key) + '" placeholder="' + (kc ? "Saved: paste a new key to replace it" : (af.provider === "anthropic" ? "sk-ant-…" : "sk-or-…")) + '"></label>';
+      h += '<div class="row"><button class="btn small" data-act="aiSaveKey">Save key</button>' + (kc ? '<button class="btn ghost small" data-act="aiTest"' + (ui.busy ? " disabled" : "") + '>Test</button><button class="btn danger small" data-act="aiRemoveKey">Remove key</button>' : "") + '</div>' + busyBlock("aiTest");
+      h += '<p class="note">Your key is stored only on this phone, never on GitHub. Each AI request is charged to your API account, roughly a few US cents for an essay marking [estimate]. Set a monthly spending limit in your provider’s dashboard. Marking uses Claude Sonnet 5.5; quick tasks use Claude Haiku 5.5.</p></section>';
+    }
 
     // backup
     h += '<section class="card"><h2>Backup and offline use</h2><p class="note">' + (window.claude ? "Your progress saves to your Claude account." : "This offline copy saves on this device only.") + ' To move progress between the Claude version and the offline app, tap Copy backup on one, then Restore on the other. Restoring merges: nothing is lost.</p>' + (installEvt ? '<button class="btn" data-act="installApp">Install as an app</button>' : "") + '<div class="grid2"><button class="btn ghost" data-act="copyBackup">Copy backup</button><button class="btn ghost" data-act="showRestore">Restore from backup</button></div>';
@@ -1170,6 +1295,7 @@
     sTimer: function (el) { var op = el.getAttribute("data-op"); if (op === "start") tStart("speak"); else if (op === "pause") tPause("speak"); else tSet("speak", 0, "up"); paintTimers(); },
     mic: function () {
       if (!DICT) return;
+      if (DICT.webSpeech && !navigator.onLine && !DICT.active()) { toast("Speech-to-type needs internet on most phones. Type your answer for now."); return; }
       if (DICT.active()) { DICT.stop().catch(function () {}); return; }
       DICT.start().catch(function (e) {
         var c = e && e.code;
@@ -1226,6 +1352,7 @@
         var d = await aiCall("genDrill", prompt, "default");
         if (!d || !d.questions || !d.questions.length) throw { code: "invalid_json" };
         d.kind = p.kind; d.type = p.kind === "reading" ? p.rtype : p.ltype;
+        p.bankId = saveToBank(d);
         stopSay();
         p.data = d; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false;
         tSet("practice", 0, "up"); if (p.kind === "reading") tStart("practice");
@@ -1241,6 +1368,7 @@
         else put("m_" + uid(), { skill: p.kind === "reading" ? "Reading" : "Listening", wrong: q.q + " → I answered: " + (p.answers[i] || "(blank)"), right: String(q.answer), note: q.explanation || d.type, date: today(), source: d.type.split(":")[0] });
       });
       addDrill({ date: today(), kind: p.kind, type: d.type, score: sc, total: qs.length });
+      if (p.bankId) markBank(p.bankId, sc);
       autoTick(["test"]);
       render();
     },
@@ -1264,6 +1392,13 @@
           sayFallback(l.text, 0.95, pitches[speakers.indexOf(l.speaker) % 4]).then(nextLine);
         })();
       }
+    },
+    openDrill: function (el) {
+      var id = el.getAttribute("data-id"), b = drillBank().filter(function (x) { return x.id === id; })[0]; if (!b) return;
+      var p = ui.practice; stopSay();
+      p.data = b.data; p.kind = b.data.kind; p.bankId = id; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false;
+      tSet("practice", 0, "up"); if (p.kind === "reading") tStart("practice");
+      render(); window.scrollTo(0, 0);
     },
     stopL: function () { ui.practice.playing = false; stopSay(); render(); },
 
@@ -1310,6 +1445,17 @@
         var k = ids[i++]; var m = mergeDoc(k, S.docs[k], o.docs[k]); if (m) put(k, m); setTimeout(step, 120);
       })();
       ui.progress.restore = false; ui.progress.restoreText = "";
+    },
+    aiSaveKey: function () {
+      var af = ui.progress.ai || {}, key = (af.key || "").trim();
+      if (key.length < 20) { toast("Paste your full API key first."); return; }
+      try { localStorage.setItem(KEY_LS, JSON.stringify({ provider: af.provider || "openrouter", key: key })); } catch (e) { toast("Couldn’t save the key on this device."); return; }
+      AI = makeKeyAI(keyCfg()); af.key = ""; toast("Key saved. Tap Test to check it."); render();
+    },
+    aiRemoveKey: function () { try { localStorage.removeItem(KEY_LS); } catch (e) {} AI = null; toast("Key removed from this device."); render(); },
+    aiTest: async function () {
+      try { var r = await aiCall("aiTest", 'Reply with only this JSON: {"ok": true}', "quick"); toast(r && r.ok ? "AI connection works." : "Connected, but the answer looked odd."); render(); }
+      catch (e) { aiFail(e); }
     },
     installApp: function () {
       if (!installEvt) return;
@@ -1423,6 +1569,7 @@
     else if (k === "ans") { ui.practice.answers[+el.getAttribute("data-q")] = v; }
     else if (k === "mf_skill") ui.progress.mform.skill = v;
     else if (k === "mfilter") { ui.progress.mfilter = v; render(); }
+    else if (k === "ai_provider") { ui.progress.ai = ui.progress.ai || {}; ui.progress.ai.provider = v; render(); }
     else if (k === "set_holiday") { setSettings({ holiday: +v }); render(); }
     else if (k === "set_exam") { if (/^\d{4}-\d{2}-\d{2}$/.test(v)) { setSettings({ exam: v }); render(); } }
     else if (k === "set_target") { setSettings({ target: +v }); render(); }
@@ -1449,6 +1596,7 @@
     }
     else if (k.indexOf("mm_") === 0) ui.progress.mform[k.slice(3)] = v;
     else if (k === "restoreText") ui.progress.restoreText = v;
+    else if (k === "ai_key") { ui.progress.ai = ui.progress.ai || {}; ui.progress.ai.key = v; }
   });
   view.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && e.target.getAttribute("data-in") === "spell") { e.preventDefault(); spellCheck(); }
@@ -1518,21 +1666,8 @@
   setInterval(function () { var t = today(); if (t !== lastToday) { if (ui.sel === lastToday) ui.sel = t; lastToday = t; softRender(); } }, 60000);
 
   // ================= start =================
-  var installEvt = null;
-  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); installEvt = e; if (ui.tab === "progress") softRender(); });
-  if ("serviceWorker" in navigator && !window.claude && (location.protocol === "https:" || location.hostname === "localhost")) {
-    navigator.serviceWorker.register("sw.js").catch(function () {});
-  }
-  loadLocal();
-  route();
-
-  (async function connect() {
-    if (!window.claude || typeof window.claude.use !== "function") { setSync("Saved on this device · works offline (AI features need the Claude version)"); return; }
-    var use = function (n) { return window.claude.use(n).catch(function () { return null; }); };
-    use("sample").then(function (s) { AI = s; if (s) softRender(); });
-    use("tts").then(function (t) { TTS = t; if (t) softRender(); });
-    use("dictation").then(function (d) {
-      DICT = d; if (!d) return;
+  function wireDict(d) {
+    DICT = d; if (!d) return;
       d.onFinal(function (ev) {
         var sp = ui.speak, add = ev.text || "";
         if (!sp.text) add = add.replace(/^\s+/, "");
@@ -1548,7 +1683,29 @@
         if (ui.tab === "speak") softRender();
       });
       softRender();
-    });
+  }
+  var installEvt = null;
+  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); installEvt = e; if (ui.tab === "progress") softRender(); });
+  if ("serviceWorker" in navigator && !window.claude && (location.protocol === "https:" || location.hostname === "localhost")) {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  }
+  window.addEventListener("online", function () { softRender(); });
+  window.addEventListener("offline", function () { softRender(); });
+  loadLocal();
+  route();
+
+  (async function connect() {
+    if (!window.claude || typeof window.claude.use !== "function") {
+      var cfg = keyCfg(); AI = cfg ? makeKeyAI(cfg) : null;
+      wireDict(makeWebSpeech());
+      setSync("Saved on this device · works offline");
+      softRender();
+      return;
+    }
+    var use = function (n) { return window.claude.use(n).catch(function () { return null; }); };
+    use("sample").then(function (s) { AI = s; if (s) softRender(); });
+    use("tts").then(function (t) { TTS = t; if (t) softRender(); });
+    use("dictation").then(function (d) { wireDict(d); });
     try {
       setSync("Connecting to your account…");
       var db = await use("db"), user = await use("user");
