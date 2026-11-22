@@ -180,42 +180,90 @@
     [s.log, s.newLog].forEach(function (m) { Object.keys(m).forEach(function (k) { if (k < cut) delete m[k]; }); });
     put("srs", { cards: s.cards, log: s.log, newLog: s.newLog, updated: new Date().toISOString() });
   }
-  function allCards() {
-    var pre = D.CARDS.map(function (a) { return { id: a[0], w: a[1], pos: a[2], def: a[3], ex: a[4], bn: a[5], topic: a[6], pre: true }; });
-    var mine = docsWithPrefix("c_").map(function (c) { c.topic = c.topic || "mine"; return c; });
-    return pre.concat(mine);
+  // ---- card data (built-in cards are built once; your own cards are read fresh) ----
+  var EX = window.IELTS_EX || {}, PRE = null, PRE_IDX = null;
+  function exsOf(c) { return [c.ex, c.ex2, c.ex3].filter(function (x) { return x && String(x).trim(); }); }
+  function preCards() {
+    if (!PRE) {
+      PRE = D.CARDS.map(function (a) { var e = EX[a[0]] || []; return { id: a[0], w: a[1], pos: a[2], def: a[3], ex: a[4], bn: a[5], topic: a[6], pre: true, lvl: e[0] || "B2", exs: [a[4], e[1], e[2]].filter(Boolean) }; });
+      PRE_IDX = {}; PRE.forEach(function (c) { PRE_IDX[c.id] = c; });
+    }
+    return PRE;
   }
-  function cardById(id) { return allCards().filter(function (c) { return c.id === id; })[0]; }
+  function mineCard(id, d) { var c = Object.assign({ id: id }, d); c.topic = c.topic || "mine"; c.lvl = c.lvl || "B2"; c.exs = exsOf(c); return c; }
+  function allCards() { return preCards().concat(docsWithPrefix("c_").map(function (d) { return mineCard(d.id, d); })); }
+  function cardById(id) { preCards(); if (PRE_IDX[id]) return PRE_IDX[id]; var d = get(id); return d ? mineCard(id, d) : undefined; }
+
+  // ---- levels, statuses and filters ----
+  var LEVELS = [["all", "All levels"], ["basic", "Basic (A2–B1)"], ["inter", "Intermediate (B2)"], ["adv", "Advanced (C1–C2)"]];
+  function lvlGroup(l) { return (l === "A2" || l === "B1") ? "basic" : (l === "B2" ? "inter" : "adv"); }
+  function lvlName(l) { return { basic: "Basic", inter: "Intermediate", adv: "Advanced" }[lvlGroup(l)]; }
+  var STATUSES = [["all", "Any status"], ["new", "Not started"], ["learning", "Learning now"], ["learnt", "Learnt"], ["mastered", "Mastered (21+ days)"], ["practised", "Practised (any)"], ["difficult", "Difficult (forgotten 2+ times)"], ["due", "Due now"]];
+  var POS = [["all", "All word types"], ["noun", "Nouns"], ["verb", "Verbs"], ["adj", "Adjectives"], ["adv", "Adverbs"], ["phrase", "Phrases & linkers"]];
+  function posGroup(p) { p = String(p || ""); if (p.indexOf("noun") === 0) return "noun"; if (p.indexOf("verb") === 0) return "verb"; if (p.indexOf("adj") === 0) return "adj"; if (p.indexOf("adv") === 0) return "adv"; return "phrase"; }
   function level(st) {
     if (!st) return "new";
-    if (st.ivl >= 21) return "mastered";
-    if (st.reps > 0 && st.ivl >= 1) return "review";
-    return "learning";
+    if (!st.reps) return "learning";
+    return st.ivl >= 21 ? "mastered" : "review";
   }
+  function matchStatus(st, f, now) {
+    switch (f) {
+      case "new": return !st;
+      case "learning": return !!st && level(st) === "learning";
+      case "learnt": return !!st && level(st) === "review";
+      case "mastered": return !!st && level(st) === "mastered";
+      case "practised": return !!st;
+      case "difficult": return !!st && (st.lapses || 0) >= 2;
+      case "due": return !!st && st.due <= now;
+      default: return true;
+    }
+  }
+  function filterCards(f) {
+    var s = srs(), now = Date.now(), q = (f.q || "").toLowerCase().trim();
+    return allCards().filter(function (c) {
+      return (f.deck === "all" || !f.deck || c.topic === f.deck) &&
+        (!f.level || f.level === "all" || lvlGroup(c.lvl) === f.level) &&
+        (!f.pos || f.pos === "all" || posGroup(c.pos) === f.pos) &&
+        matchStatus(s.cards[c.id], f.status || "all", now) &&
+        (!q || c.w.toLowerCase().indexOf(q) !== -1 || c.def.toLowerCase().indexOf(q) !== -1 || (c.bn || "").indexOf(q) !== -1);
+    });
+  }
+
+  // ---- scheduling: Anki-style learning steps (1, 5, 10 min) before a card graduates ----
   function schedule(prev, q) {
-    var st = prev ? Object.assign({}, prev) : { ivl: 0, ease: 2.5, reps: 0, lapses: 0 };
-    var now = Date.now();
-    if (q === 0) {
-      st.lapses = (st.lapses || 0) + 1; st.reps = 0; st.ivl = 0; st.ease = Math.max(1.3, st.ease - 0.2); st.due = now + 60000;
+    var st = prev ? Object.assign({}, prev) : { ivl: 0, ease: 2.5, reps: 0, lapses: 0, step: 0 };
+    var now = Date.now(), MIN = 60000;
+    if (!st.reps) {
+      // learning (new or relearning): failures here do not lower ease
+      if (q === 0) { st.step = 0; st.due = now + MIN; }
+      else if (q === 1) { st.due = now + 5 * MIN; }
+      else if (q === 2) {
+        if (!st.step) { st.step = 1; st.due = now + 10 * MIN; }
+        else { st.reps = 1; st.step = 0; st.ivl = st.lastIvl ? Math.max(1, Math.round(st.lastIvl * 0.5)) : 1; st.due = startOfToday() + st.ivl * 864e5; }
+      } else { st.reps = 1; st.step = 0; st.ivl = st.lastIvl ? Math.max(2, Math.round(st.lastIvl * 0.7)) : 4; st.due = startOfToday() + st.ivl * 864e5; }
+    } else if (q === 0) {
+      st.lapses = (st.lapses || 0) + 1; st.lastIvl = st.ivl; st.reps = 0; st.step = 0; st.ivl = 0;
+      st.ease = Math.max(1.3, st.ease - 0.2); st.due = now + 10 * MIN;
     } else {
       var ivl;
-      if (q === 1) { ivl = st.reps === 0 ? 1 : Math.max(1, Math.round(st.ivl * 1.2)); st.ease = Math.max(1.3, st.ease - 0.15); }
-      else if (q === 2) { ivl = st.reps === 0 ? 1 : (st.reps === 1 ? 3 : Math.round(Math.max(st.ivl, 1) * st.ease)); }
-      else { ivl = st.reps === 0 ? 4 : Math.round(Math.max(st.ivl, 1) * st.ease * 1.3); st.ease = st.ease + 0.15; }
+      if (q === 1) { ivl = Math.max(st.ivl + 1, Math.round(st.ivl * 1.2)); st.ease = Math.max(1.3, st.ease - 0.15); }
+      else if (q === 2) { ivl = Math.max(st.ivl + 1, Math.round(st.ivl * st.ease)); }
+      else { ivl = Math.max(st.ivl + 2, Math.round(st.ivl * st.ease * 1.3)); st.ease = st.ease + 0.15; }
       st.ivl = Math.min(ivl, 365); st.reps = (st.reps || 0) + 1; st.due = startOfToday() + st.ivl * 864e5;
     }
     st.last = now;
     return st;
   }
   function ivlLabel(prev, q) {
-    if (q === 0) return "1 min";
-    var d = schedule(prev, q).ivl;
+    var n = schedule(prev, q), ms = n.due - Date.now();
+    if (ms < 3600000) return Math.max(1, Math.round(ms / 60000)) + " min";
+    var d = n.ivl;
     return d < 30 ? d + "d" : Math.round(d / 30) + " mo";
   }
-  function deckCards(deck) { return allCards().filter(function (c) { return deck === "all" || c.topic === deck; }); }
+  function deckCards(deck) { return filterCards({ deck: deck || "all", level: ui.cards.level || "all" }); }
   function dueCount(deck) {
     var s = srs(), now = Date.now();
-    return deckCards(deck || "all").filter(function (c) { var st = s.cards[c.id]; return st && st.due <= now; }).length;
+    return allCards().filter(function (c) { var st = s.cards[c.id]; return (deck === "all" || !deck || c.topic === deck) && st && st.due <= now; }).length;
   }
   function newLeft() { var s = srs(); return Math.max(0, settings().newPerDay - (s.newLog[today()] || 0)); }
   function buildQueue(deck) {
@@ -255,7 +303,7 @@
   function drillBank() { var b = get("drillbank"); return ((b && b.list) || []).slice().reverse(); }
   function saveToBank(d) {
     var b = get("drillbank"), list = ((b && b.list) || []).slice();
-    var id = uid(); list.push({ id: id, date: today(), data: d, score: null, total: (d.questions || []).length });
+    var id = uid(); list.push({ id: id, date: today(), data: d, score: null, total: allQs(d).length });
     while (list.length > 20) list.shift();
     put("drillbank", { list: list, updated: new Date().toISOString() });
     return id;
@@ -264,6 +312,40 @@
     var b = get("drillbank"); if (!b || !b.list) return;
     var list = b.list.map(function (x) { return x.id === id ? Object.assign({}, x, { score: score }) : x; });
     put("drillbank", { list: list, updated: new Date().toISOString() });
+  }
+  function drillPrompt(kind, typeId, topicIn, section) {
+    var D4x = window.IELTS_DATA4 || { RQ: [], LQ: [] }, list = kind === "reading" ? D4x.RQ : D4x.LQ;
+    var topic = (topicIn || "").trim() ? topicIn.trim() : "any typical IELTS topic (science, history, society, environment, psychology, technology, education, work)";
+    var picked;
+    if (typeId === "mixed") {
+      picked = list.slice().sort(function () { return Math.random() - 0.5; }).slice(0, 3);
+      if (kind === "reading" && picked.some(function (t) { return t.id === "ynng"; }) && picked.some(function (t) { return t.id === "tfng"; })) picked = picked.filter(function (t) { return t.id !== "tfng"; }).concat([list.filter(function (t) { return t.id === "sent"; })[0]]);
+    } else picked = list.filter(function (t) { return t.id === typeId; }).slice(0, 1);
+    if (!picked.length) picked = list.slice(0, 1);
+    var groupRules = picked.map(function (t, i) { return (i + 1) + ". " + t.spec; }).join("\n");
+    var schema = '"groups": [{"type": "the group type id", "instructions": "the IELTS instruction line, including any word limit", "options": ["optional shared list for matching, word boxes and map letters"], "outline": {"style": "form | notes | table | flowchart | summary", "rows": [["cell", "cell with a gap like [1]"]]}, "map": {"cols": 3, "rows": 3, "cells": [{"r": 0, "c": 0, "t": "label"}]}, "questions": [{"q": "...", "options": ["only for multiple choice or TRUE/FALSE style"], "answer": "... or an array for choose-two", "alt": ["accepted variants"], "explanation": "why, quoting or pointing to the evidence"}]}]';
+    var common = 'Leave out "options", "outline" or "map" when a group does not use them. In an outline, [1] means the group’s first question, [2] its second, and so on; every question must appear exactly once as a gap. Every answer must be clearly supported by the text. Names, places and figures must be invented.';
+    if (kind === "reading") {
+      return 'Write an original IELTS Academic Reading practice set.\nTopic: ' + topic + '.\nPassage: 450 to 550 words, formal academic style, 5 paragraphs labelled A to E. Paraphrase between passage and questions, as the real test does.\nQuestion groups, in this order:\n' + groupRules + '\n' + common + '\nReply with only JSON: {"title": "...", "paragraphs": [{"label": "A", "text": "..."}], ' + schema + '}';
+    }
+    return 'Write an original IELTS Listening practice script for ' + (section || "Section 1: an everyday conversation") + '. Topic: ' + topic + '.\nLength: 350 to 450 words of natural spoken English, with small hesitations and at least two typical IELTS distractors (a speaker correcting a number, date or spelling, or rejecting the first option mentioned). Answers must be heard in the same order as the questions.\nQuestion groups, in this order:\n' + groupRules + '\n' + common + '\nReply with only JSON: {"title": "...", "context": "one line describing the situation", "lines": [{"speaker": "name or role", "text": "one turn of speech"}], ' + schema + '}';
+  }
+  function loadDrill(d, bankId) {
+    var p = ui.practice; stopSay();
+    p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false;
+    tSet("practice", 0, "up"); if (p.kind === "reading") tStart("practice");
+    render();
+    setTimeout(function () { var el = document.querySelector(".passage") || document.querySelector(".qgroup"); if (el && el.scrollIntoView) el.closest("section").scrollIntoView({ behavior: "smooth", block: "start" }); }, 30);
+  }
+  function validDrill(d) { return d && groupsOf(d).some(function (g) { return g.questions && g.questions.length; }); }
+  async function runDrill(kind, typeId) {
+    var p = ui.practice;
+    try {
+      var d = await aiCall("genDrill", drillPrompt(kind, typeId, p.topic, p.lsec), "default");
+      if (!validDrill(d)) throw { code: "invalid_json" };
+      d.kind = kind; d.type = typeId === "mixed" ? "Mixed set" : typeName(kind, typeId);
+      loadDrill(d, saveToBank(d));
+    } catch (e) { aiFail(e); }
   }
   function addDrill(entry) {
     var list = drills().concat([entry]); if (list.length > 300) list = list.slice(-300);
@@ -406,6 +488,21 @@
     return '<p class="note">AI features (marking, feedback, new drills): add an API key in <a href="#progress">Progress → AI settings</a>, or use the Claude version.</p>';
   }
 
+  var persisted = null;
+  function askPersist() {
+    if (window.claude || persisted !== null || !navigator.storage || !navigator.storage.persist) return;
+    navigator.storage.persisted().then(function (p) { if (p) { persisted = true; return; } return navigator.storage.persist().then(function (g) { persisted = !!g; }); }).catch(function () { persisted = false; });
+  }
+  function markBackup() { try { localStorage.setItem("ielts-last-backup", String(Date.now())); } catch (e) {} }
+  function backupDue() {
+    if (window.claude) return false;
+    var n = 0, last = 0; try { last = +localStorage.getItem("ielts-last-backup") || 0; } catch (e) {}
+    n = Object.keys(srs().cards).length;
+    return n >= 20 && Date.now() - last > 14 * 864e5;
+  }
+  function hasLocalVoice() {
+    try { return speechSynthesis.getVoices().some(function (v) { return /^en/i.test(v.lang) && v.localService; }); } catch (e) { return false; }
+  }
   function canSay() { return !ttsOff && (TTS || ("speechSynthesis" in window)); }
   function sayFallback(text, rate, pitch) {
     return new Promise(function (res, rej) {
@@ -483,10 +580,10 @@
     sel: today(),
     busy: null,
     confirm: null,
-    cards: { mode: "home", deck: "all", search: "", session: null, spell: null, quiz: null, add: { w: "", pos: "", def: "", ex: "", bn: "", topic: "mine" }, showAll: false },
+    cards: { mode: "home", deck: "all", level: "all", search: "", session: null, spell: null, quiz: null, cloze: null, b: { deck: "all", level: "all", status: "all", pos: "all" }, add: { w: "", pos: "", def: "", ex: "", ex2: "", ex3: "", bn: "", topic: "mine", lvl: "B2" }, showAll: false },
     write: { task: 2, pi: Math.floor(Math.random() * D.TASK2.length), p1: 0, custom: null, text: "", result: null, view: null, plan: false, savedId: null },
     speak: { part: 2, idx: Math.floor(Math.random() * D.PART2.length), p1: Math.floor(Math.random() * D.PART1.length), phase: "idle", notes: "", text: "", partial: "", result: null, view: null, secs: 0, savedId: null },
-    practice: { kind: "reading", rtype: "True / False / Not Given", ltype: "Section 1: an everyday conversation", topic: "", data: null, answers: {}, checked: false, exam: true, plays: 0, playing: false, script: false },
+    practice: { kind: "reading", rtype: "tfng", ltype: "lform", lsec: "Section 1: an everyday conversation", topic: "", data: null, answers: {}, checked: false, exam: true, plays: 0, playing: false, script: false },
     progress: { form: { date: today(), L: "", R: "", W: "", S: "", Lraw: "", Rraw: "" }, mfilter: "all", mform: { skill: "Writing", wrong: "", right: "", note: "" }, mquiz: null, restore: false, restoreText: "", backupText: "" }
   };
   try { var dr = JSON.parse(localStorage.getItem("ielts-drafts") || "null"); if (dr) { ui.write.text = dr.write || ""; ui.speak.text = dr.speak || ""; } } catch (e) {}
@@ -555,7 +652,8 @@
     var graded = essays7.filter(function (e) { return e.result && e.result.overall; });
     var essayAvg = graded.length ? (graded.reduce(function (a, e) { return a + Number(e.result.overall); }, 0) / graded.length) : null;
 
-    var h = '<section class="card"><div class="row between"><h2>Focus today</h2><span class="note">' + esc(pretty(t)) + '</span></div><div class="tiles">';
+    var h = backupDue() ? '<section class="card notice"><b>Back up your progress</b><p class="note">It has been over 2 weeks. A backup file keeps your words safe if the phone is reset.</p><div class="row"><button class="btn small" data-act="downloadBackup">Save backup file</button><button class="btn ghost small" data-act="snoozeBackup">Later</button></div></section>' : "";
+    h += '<section class="card"><div class="row between"><h2>Focus today</h2><span class="note">' + esc(pretty(t)) + '</span></div><div class="tiles">';
     h += '<button class="tile' + (due > 30 ? " alert" : "") + '" data-act="go" data-tab="cards"><b>' + due + '</b><span>flashcards due' + (newLeft() ? " · " + newLeft() + " new" : "") + '</span></button>';
     if (weak) {
       var gap = st.target - weak.band;
@@ -604,67 +702,96 @@
     var pct = n ? Math.round(i / n * 100) : 0;
     return '<div class="sesshead"><button class="iconbtn" data-act="' + closeAct + '" aria-label="Close">✕</button><div class="bar grow" aria-hidden="true"><i style="width:' + pct + '%"></i></div><span class="note num">' + Math.min(i + 1, n) + '/' + n + '</span>' + (extra || "") + '</div>';
   }
+  function chipRow(act, items, current, counts) {
+    var h = '<div class="deckbar" role="group">';
+    items.forEach(function (it) {
+      var n = counts ? counts[it[0]] : null;
+      if (counts && !n && it[0] !== "all" && it[0] !== "mine") return;
+      h += '<button class="deckchip" data-act="' + act + '" data-v="' + it[0] + '" aria-pressed="' + (current === it[0]) + '">' + esc(it[1]) + (n != null ? ' <span>' + n + '</span>' : "") + '</button>';
+    });
+    return h + '</div>';
+  }
   function viewCards() {
     var c = ui.cards;
     if (c.mode === "review") return viewReview();
     if (c.mode === "spell") return viewSpell();
     if (c.mode === "quiz") return viewQuiz();
     if (c.mode === "match") return viewMatch();
+    if (c.mode === "cloze") return viewCloze();
     if (c.mode === "browse") return viewBrowse();
     var s = srs(), cards = deckCards(c.deck), now = Date.now();
-    var counts = { due: 0, learning: 0, review: 0, mastered: 0, "new": 0 };
-    cards.forEach(function (x) { var st = s.cards[x.id]; counts[level(st)]++; if (st && st.due <= now) counts.due++; });
+    var counts = { due: 0, learning: 0, review: 0, mastered: 0, "new": 0, difficult: 0 };
+    cards.forEach(function (x) { var st = s.cards[x.id]; counts[level(st)]++; if (st && st.due <= now) counts.due++; if (st && (st.lapses || 0) >= 2) counts.difficult++; });
     var q = buildQueue(c.deck).length, total = Math.max(1, cards.length);
     var fresh = Math.min(newLeft(), counts["new"]);
-    var h = '<section class="card hero"><div class="row between"><div><div class="note">' + esc(deckName(c.deck)) + '</div><div class="hero-num num">' + q + '</div><div class="note">' + (q ? "cards ready · " + counts.due + " due, " + fresh + " new" : "All caught up. Try a game below.") + '</div></div><div class="streakbox"><b class="num">' + (s.log[today()] || 0) + '</b><span>reviewed today</span></div></div>';
+    var scope = deckName(c.deck) + (c.level !== "all" ? " · " + LEVELS.filter(function (l) { return l[0] === c.level; })[0][1] : "");
+    var h = '<section class="card hero"><div class="row between"><div><div class="note">' + esc(scope) + '</div><div class="hero-num num">' + q + '</div><div class="note">' + (q ? "cards ready · " + counts.due + " due, " + fresh + " new" : "All caught up. Try a drill below.") + '</div></div><div class="streakbox"><b class="num">' + (s.log[today()] || 0) + '</b><span>reviewed today</span></div></div>';
     h += '<div class="stack" aria-hidden="true"><i class="m" style="width:' + (counts.mastered / total * 100) + '%"></i><i class="l" style="width:' + ((counts.learning + counts.review) / total * 100) + '%"></i></div>';
-    h += '<div class="legend"><span><i class="f"></i>Mastered ' + counts.mastered + '</span><span><i class="p"></i>Learning ' + (counts.learning + counts.review) + '</span><span><i></i>Not started ' + counts["new"] + '</span></div>';
+    h += '<div class="legend"><span><i class="f"></i>Mastered ' + counts.mastered + '</span><span><i class="p"></i>Learnt or learning ' + (counts.learning + counts.review) + '</span><span><i></i>Not started ' + counts["new"] + '</span></div>';
     h += '<button class="btn big wide" data-act="startReview"' + (q ? "" : " disabled") + '>' + (q ? "Start review" : "Nothing due right now") + '</button></section>';
 
-    h += '<div class="deckbar" role="group" aria-label="Choose a deck">';
-    var keys = ["all"].concat(Object.keys(D.TOPICS));
-    keys.forEach(function (k) {
-      var n = k === "all" ? allCards().length : allCards().filter(function (x) { return x.topic === k; }).length;
-      if (!n && k !== "mine") return;
-      h += '<button class="deckchip" data-act="deck" data-deck="' + k + '" aria-pressed="' + (c.deck === k) + '">' + esc(k === "all" ? "All" : D.TOPICS[k]) + ' <span>' + n + '</span></button>';
-    });
-    h += '</div>';
+    // level filter
+    var lc = { all: 0, basic: 0, inter: 0, adv: 0 };
+    filterCards({ deck: c.deck }).forEach(function (x) { lc.all++; lc[lvlGroup(x.lvl)]++; });
+    h += '<div class="filterlabel">Level</div>' + chipRow("setLevel", LEVELS, c.level, lc);
+    // deck filter
+    var dc = { all: 0 };
+    filterCards({ level: c.level }).forEach(function (x) { dc.all++; dc[x.topic] = (dc[x.topic] || 0) + 1; });
+    h += '<div class="filterlabel">Deck</div>' + chipRow("setDeck", [["all", "All decks"]].concat(Object.keys(D.TOPICS).map(function (k) { return [k, D.TOPICS[k]]; })), c.deck, dc);
 
     h += '<div class="modes">';
+    h += modeTile("cloze", "Gap-fill", "Recall the word inside a real sentence: the most effective drill", "✎");
     h += modeTile("match", "Match game", "Pair 6 words with their meanings against the clock", "⚡");
     h += modeTile("spell", "Spelling drill", "Hear a word, type it: trains Listening spelling", "🎧");
     h += modeTile("quiz", "Meaning quiz", "Pick the right word for each meaning", "✓");
-    h += modeTile("browse", "Browse & add", "Search all " + allCards().length + " words or add your own", "+");
-    h += '</div>';
+    h += modeTile("difficult", "Difficult words", counts.difficult ? counts.difficult + " words you keep forgetting" : "Words you forget twice appear here", "!");
+    h += modeTile("browse", "Browse & filter", "Filter by level, status and type; add your own words", "⌕");
+    h += '</div><p class="note">Drills use the level and deck you pick above. In Browse you can also filter by what you have learnt.</p>';
     return h;
   }
   function modeTile(m, title, sub, mark) {
     return '<button class="mode" data-act="mode" data-m="' + m + '"><span class="mark" aria-hidden="true">' + mark + '</span><b>' + esc(title) + '</b><span>' + esc(sub) + '</span></button>';
   }
+  function browseFilter() { var b = ui.cards.b; return { deck: b.deck, level: b.level, status: b.status, pos: b.pos, q: ui.cards.search }; }
   function viewBrowse() {
-    var c = ui.cards, s = srs(), cards = deckCards(c.deck), a = c.add;
-    var h = '<section class="card"><div class="row between"><button class="textbtn" data-act="cardsHome">← Flashcards</button><span class="note">' + esc(deckName(c.deck)) + '</span></div>';
-    h += '<h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
+    var c = ui.cards, b = c.b, s = srs(), a = c.add;
+    var shown = filterCards(browseFilter());
+    var h = '<section class="card"><div class="row between"><button class="textbtn" data-act="cardsHome">← Flashcards</button><span class="note">' + allCards().length + ' words in total</span></div><h2>Find words</h2>';
+    h += '<input type="text" placeholder="Search English, meaning or বাংলা" data-in="cardSearch" value="' + esc(c.search) + '" aria-label="Search words">';
+    h += '<div class="grid2">';
+    h += '<label class="field">Status<select data-ch="b_status">' + STATUSES.map(function (o) { return '<option value="' + o[0] + '"' + (b.status === o[0] ? " selected" : "") + '>' + esc(o[1]) + '</option>'; }).join("") + '</select></label>';
+    h += '<label class="field">Level<select data-ch="b_level">' + LEVELS.map(function (o) { return '<option value="' + o[0] + '"' + (b.level === o[0] ? " selected" : "") + '>' + esc(o[1]) + '</option>'; }).join("") + '</select></label>';
+    h += '<label class="field">Deck<select data-ch="b_deck"><option value="all">All decks</option>' + Object.keys(D.TOPICS).map(function (k) { return '<option value="' + k + '"' + (b.deck === k ? " selected" : "") + '>' + esc(D.TOPICS[k]) + '</option>'; }).join("") + '</select></label>';
+    h += '<label class="field">Word type<select data-ch="b_pos">' + POS.map(function (o) { return '<option value="' + o[0] + '"' + (b.pos === o[0] ? " selected" : "") + '>' + esc(o[1]) + '</option>'; }).join("") + '</select></label>';
+    h += '</div><div class="row between"><b class="num">' + shown.length + ' words match</b>' + (b.status !== "all" || b.level !== "all" || b.deck !== "all" || b.pos !== "all" || c.search ? '<button class="textbtn" data-act="clearFilters">Clear filters</button>' : "") + '</div>';
+    if (shown.length) {
+      h += '<div class="grid2"><button class="btn" data-act="studyFiltered">Study these (' + Math.min(shown.length, 40) + ')</button><button class="btn ghost" data-act="drillFiltered" data-m="cloze">Gap-fill these</button><button class="btn ghost" data-act="drillFiltered" data-m="quiz">Quiz these</button><button class="btn ghost" data-act="drillFiltered" data-m="match">Match these</button></div>';
+    }
+    h += '</section>';
+
+    var limit = c.showAll ? shown.length : 40;
+    h += '<section class="card"><div class="wordlist">';
+    shown.slice(0, limit).forEach(function (x) {
+      var st = s.cards[x.id], lv = level(st);
+      h += '<details><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="cefr">' + esc(x.lvl) + '</span><span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></summary><div class="body"><div>' + esc(x.def) + '</div>';
+      h += '<ol class="exlist">' + x.exs.map(function (e) { return '<li><span>' + esc(e) + '</span>' + speakBtn(e) + '</li>'; }).join("") + '</ol>';
+      if (x.bn) h += '<details><summary class="small muted">বাংলা অর্থ দেখুন</summary><div class="bn">' + esc(x.bn) + '</div></details>';
+      h += '<div class="row">' + speakBtn(x.w) + (st ? '<span class="note">' + (st.due > Date.now() ? "Next review " + short(keyOf(new Date(st.due))) : "Due now") + ((st.lapses || 0) ? " · forgotten " + st.lapses + "×" : "") + '</span>' : "") + '<span class="grow"></span><button class="btn ghost small" data-act="cardNow" data-id="' + x.id + '">Review soon</button>' + (x.pre ? "" : '<button class="btn danger small" data-act="cardDel" data-id="' + x.id + '">Delete</button>') + '</div>' + confirmBlock("card:" + x.id, "Delete this card and its progress?") + '</div></details>';
+    });
+    if (!shown.length) h += '<p class="empty">No words match these filters.</p>';
+    h += '</div>' + (shown.length > limit ? '<button class="btn ghost" data-act="showAllCards">Show all ' + shown.length + '</button>' : "") + '</section>';
+
+    h += '<section class="card"><h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
     if (aiReady()) h += '<button class="btn ghost" data-act="addFill"' + (ui.busy ? " disabled" : "") + '>Fill with AI</button>';
     h += '</div>' + busyBlock("addFill");
     if (a.w || a.def) {
-      h += '<div class="grid2"><label class="field">Part of speech<input type="text" data-in="add_pos" value="' + esc(a.pos) + '"></label><label class="field">Deck<select data-ch="add_topic">';
-      Object.keys(D.TOPICS).forEach(function (k) { h += '<option value="' + k + '"' + (a.topic === k ? " selected" : "") + '>' + esc(D.TOPICS[k]) + '</option>'; });
-      h += '</select></label></div><label class="field">Meaning (English)<input type="text" data-in="add_def" value="' + esc(a.def) + '"></label><label class="field">Example sentence<input type="text" data-in="add_ex" value="' + esc(a.ex) + '"></label><label class="field">Bangla meaning (optional)<input type="text" data-in="add_bn" value="' + esc(a.bn) + '"></label><button class="btn" data-act="addSave">Save card</button>';
+      h += '<div class="grid2"><label class="field">Part of speech<input type="text" data-in="add_pos" value="' + esc(a.pos) + '"></label><label class="field">Level<select data-ch="add_lvl">' + ["A2", "B1", "B2", "C1", "C2"].map(function (l) { return '<option' + ((a.lvl || "B2") === l ? " selected" : "") + '>' + l + '</option>'; }).join("") + '</select></label></div>';
+      h += '<label class="field">Deck<select data-ch="add_topic">' + Object.keys(D.TOPICS).map(function (k) { return '<option value="' + k + '"' + (a.topic === k ? " selected" : "") + '>' + esc(D.TOPICS[k]) + '</option>'; }).join("") + '</select></label>';
+      h += '<label class="field">Meaning (English)<input type="text" data-in="add_def" value="' + esc(a.def) + '"></label>';
+      h += '<label class="field">Example sentence 1<input type="text" data-in="add_ex" value="' + esc(a.ex) + '"></label><label class="field">Example sentence 2<input type="text" data-in="add_ex2" value="' + esc(a.ex2 || "") + '"></label><label class="field">Example sentence 3<input type="text" data-in="add_ex3" value="' + esc(a.ex3 || "") + '"></label>';
+      h += '<label class="field">Bangla meaning (optional)<input type="text" data-in="add_bn" value="' + esc(a.bn) + '"></label><button class="btn" data-act="addSave">Save card</button>';
     }
-    h += aiNote() + '</section>';
-    var search = c.search.toLowerCase();
-    var shown = cards.filter(function (x) { return !search || x.w.toLowerCase().indexOf(search) !== -1 || x.def.toLowerCase().indexOf(search) !== -1; });
-    var limit = c.showAll ? shown.length : 40;
-    h += '<section class="card"><h2>Words (' + shown.length + ')</h2><input type="text" placeholder="Search words or meanings" data-in="cardSearch" value="' + esc(c.search) + '" aria-label="Search words"><div class="wordlist">';
-    shown.slice(0, limit).forEach(function (x) {
-      var st = s.cards[x.id], lv = level(st);
-      h += '<details><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="lvl ' + lv + '">' + lv + '</span></summary><div class="body"><div>' + esc(x.def) + '</div>' + (x.ex ? '<div class="muted">“' + esc(x.ex) + '”</div>' : "") + (x.bn ? '<details><summary class="small muted">বাংলা অর্থ দেখুন</summary><div class="bn">' + esc(x.bn) + '</div></details>' : "");
-      h += '<div class="row">' + speakBtn(x.w) + (st && st.due > Date.now() ? '<span class="note">Next review ' + short(keyOf(new Date(st.due))) + '</span>' : "") + '<span class="grow"></span><button class="btn ghost small" data-act="cardNow" data-id="' + x.id + '">Review soon</button>' + (x.pre ? "" : '<button class="btn danger small" data-act="cardDel" data-id="' + x.id + '">Delete</button>') + '</div>' + confirmBlock("card:" + x.id, "Delete this card and its progress?") + '</div></details>';
-    });
-    if (!shown.length) h += '<p class="empty">No words match.</p>';
-    h += '</div>' + (shown.length > limit ? '<button class="btn ghost" data-act="showAllCards">Show all ' + shown.length + '</button>' : "") + '</section>';
-    return h;
+    return h + aiNote() + '</section>';
   }
   function reviewControls() {
     var sess = ui.cards.session, s = srs(), st = s.cards[sess.queue[sess.i]];
@@ -673,8 +800,8 @@
     [["again", "Again", 0], ["hard", "Hard", 1], ["good", "Good", 2], ["easy", "Easy", 3]].forEach(function (b) {
       h += '<button class="' + b[0] + '" data-act="rate" data-q="' + b[2] + '">' + b[1] + '<span>' + ivlLabel(st, b[2]) + '</span></button>';
     });
-    h += '</div><p class="note center">Swipe the card: right = Good, left = Again · keys 1–4</p>';
-    if (AI) {
+    h += '</div><p class="note center">Swipe the card: right = Good, left = Again · keys 1–4. New words come back after a few minutes before they move to days.</p>';
+    if (aiReady()) {
       h += '<details class="practise"' + (sess.use || sess.check ? " open" : "") + '><summary class="textbtn">Practise: write a sentence with this word</summary><div class="row" style="margin-top:8px"><input type="text" class="grow" placeholder="Your sentence" data-in="useIt" value="' + esc(sess.use || "") + '" aria-label="Your sentence"><button class="btn ghost small" data-act="checkUse"' + (ui.busy ? " disabled" : "") + '>Check</button></div>' + busyBlock("checkUse");
       if (sess.check) h += '<div class="fix"><b style="color:' + (sess.check.ok ? "var(--good)" : "var(--bad)") + '">' + (sess.check.ok ? "Correct use" : "Not quite") + '</b><span>' + esc(sess.check.feedback) + '</span>' + (sess.check.better ? '<span class="muted">Better: ' + esc(sess.check.better) + '</span>' : "") + '</div>';
       h += '</details>';
@@ -685,7 +812,7 @@
     var sess = ui.cards.session, s = srs();
     if (sess.i >= sess.queue.length) {
       var acc = sess.done ? Math.round(100 * (sess.done - sess.again) / sess.done) : 0;
-      return '<section class="card hero center"><div class="hero-num">🎉</div><h2>Session complete</h2><div class="tiles"><div class="tile"><b>' + sess.done + '</b><span>cards reviewed</span></div><div class="tile"><b>' + acc + '%</b><span>remembered</span></div><div class="tile"><b>' + sess.again + '</b><span>to see again</span></div></div><div class="grid2"><button class="btn" data-act="mode" data-m="match">Play match game</button><button class="btn ghost" data-act="cardsHome">Done</button></div></section>';
+      return '<section class="card hero center"><div class="hero-num">🎉</div><h2>Session complete</h2><div class="tiles"><div class="tile"><b>' + sess.done + '</b><span>cards reviewed</span></div><div class="tile"><b>' + acc + '%</b><span>remembered first time</span></div><div class="tile"><b>' + sess.again + '</b><span>marked Again</span></div></div><div class="grid2"><button class="btn" data-act="mode" data-m="cloze">Gap-fill drill</button><button class="btn ghost" data-act="cardsHome">Done</button></div></section>';
     }
     var id = sess.queue[sess.i], x = cardById(id);
     if (!x) { sess.i++; return viewReview(); }
@@ -694,11 +821,48 @@
     var h = '<section class="card session">' + sessHead("cardsHome", sess.i, sess.queue.length, canSay() ? autoBtn : "");
     h += '<div class="flipwrap" id="flipwrap"><div class="swipe-tag again" id="tagAgain">Again</div><div class="swipe-tag good" id="tagGood">Good</div>';
     h += '<div class="flipcard' + (sess.revealed ? " flipped" : "") + '" id="flipcard" tabindex="0" role="button" aria-label="Flashcard: ' + esc(x.w) + '. Tap to flip.">';
-    h += '<div class="face front"><div class="row between full"><span class="chip quiet">' + esc(D.TOPICS[x.topic] || "") + '</span><span class="lvl ' + lv + '">' + lv + '</span></div><div class="word">' + esc(x.w) + '</div><div class="pos">' + esc(x.pos || "") + '</div>' + speakBtn(x.w) + '<div class="hint">Do you know it? Say the meaning, then tap.</div></div>';
-    h += '<div class="face back"><div class="row"><div class="word sm grow">' + esc(x.w) + '</div>' + speakBtn(x.w) + '</div><div class="def">' + esc(x.def) + '</div>' + (x.ex ? '<div class="row"><div class="ex grow">' + esc(x.ex) + '</div>' + speakBtn(x.ex) + '</div>' : "");
+    h += '<div class="face front"><div class="row between full"><span class="chip quiet">' + esc(D.TOPICS[x.topic] || "") + '</span><span><span class="cefr">' + esc(x.lvl) + '</span> <span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></span></div><div class="word">' + esc(x.w) + '</div><div class="pos">' + esc(x.pos || "") + ' · ' + esc(lvlName(x.lvl)) + '</div>' + speakBtn(x.w) + '<div class="hint">Do you know it? Say the meaning, then tap.</div></div>';
+    h += '<div class="face back"><div class="row"><div class="word sm grow">' + esc(x.w) + '</div>' + speakBtn(x.w) + '</div><div class="def">' + esc(x.def) + '</div>';
+    h += '<ol class="exlist">' + x.exs.map(function (e) { return '<li><span>' + highlightWord(e, x.w) + '</span>' + speakBtn(e) + '</li>'; }).join("") + '</ol>';
     if (x.bn) h += sess.bn ? '<div class="bn">' + esc(x.bn) + '</div>' : '<button class="textbtn" data-act="showBn">বাংলা অর্থ দেখুন</button>';
     h += '</div></div></div><div id="sessControls" class="controls">' + reviewControls() + '</div></section>';
     return h;
+  }
+  // find the word (or its inflected form) inside a sentence
+  function findInSentence(sentence, word) {
+    var w = String(word).replace(/^(a|an|the|to|be) /i, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var m = new RegExp("\\b(" + w + ")(s|es|ed|d|ing|ly)?\\b", "i").exec(sentence);
+    if (!m && w.indexOf(" ") === -1 && w.length > 4) {
+      var stem = w.slice(0, Math.max(4, w.length - (/e$/.test(w) ? 1 : 2)));
+      m = new RegExp("\\b(" + stem + "[a-z]*)\\b", "i").exec(sentence);
+    }
+    if (!m && w.indexOf(" ") !== -1) {
+      var parts = w.split(" "), first = parts[0], rest = parts.slice(1).join(" ");
+      m = new RegExp("\\b(" + first + "[a-z]*\\s+" + rest + ")\\b", "i").exec(sentence);
+    }
+    return m ? { index: m.index, text: m[0] } : null;
+  }
+  function highlightWord(sentence, word) {
+    var f = findInSentence(sentence, word);
+    if (!f) return esc(sentence);
+    return esc(sentence.slice(0, f.index)) + "<mark>" + esc(f.text) + "</mark>" + esc(sentence.slice(f.index + f.text.length));
+  }
+  function viewCloze() {
+    var cz = ui.cards.cloze;
+    if (cz.i >= cz.items.length) {
+      return '<section class="card hero center"><div class="hero-num">' + cz.score + '/' + cz.items.length + '</div><h2>Gap-fill done</h2>' + (cz.wrong.length ? '<p class="note">Now due for review: ' + cz.wrong.map(esc).join(", ") + '</p>' : '<p class="note">Every word recalled in context.</p>') + '<div class="grid2"><button class="btn" data-act="mode" data-m="cloze">Another round</button><button class="btn ghost" data-act="cardsHome">Done</button></div></section>';
+    }
+    var it = cz.items[cz.i], x = cardById(it.id);
+    var blank = it.ans.charAt(0) + it.ans.slice(1).replace(/[A-Za-z]/g, "_");
+    var h = '<section class="card session">' + sessHead("cardsHome", cz.i, cz.items.length, '<span class="chip">' + cz.score + ' ✓</span>');
+    h += '<div class="flash"><p class="note">Fill the gap with the right word (the first letter is given).</p><div class="clozes">' + esc(it.s.slice(0, it.index)) + '<span class="gap">' + esc(blank) + '</span>' + esc(it.s.slice(it.index + it.ans.length)) + '</div>';
+    h += '<p class="note">Meaning: ' + esc(x.def) + (cz.hint ? ' · ' + esc(x.pos) + ', ' + it.ans.length + ' letters' : "") + '</p></div>';
+    if (!cz.result) {
+      h += '<input type="text" class="bigin" id="clozeInput" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="cloze" value="' + esc(cz.input) + '" placeholder="Type the missing word" aria-label="Missing word"><div class="grid2"><button class="btn big" data-act="clozeCheck">Check</button><button class="btn ghost" data-act="clozeHint">Hint</button></div>';
+    } else {
+      h += '<div class="verdict ' + cz.result + '"><b>' + (cz.result === "right" ? "Correct!" : "Not quite") + '</b><span>' + (cz.result === "right" ? "" : "You wrote: " + esc(cz.input || "(nothing)") + " · ") + 'Answer: <b>' + esc(it.ans) + '</b></span></div><div class="row">' + speakBtn(it.s) + '<span class="note grow">' + esc(it.s) + '</span></div><button class="btn big wide" data-act="clozeNext">Next</button>';
+    }
+    return h + '</section>';
   }
   function flipCard() {
     var sess = ui.cards.session; if (!sess) return;
@@ -765,19 +929,91 @@
   }
 
   // ---------------- WRITING ----------------
+  var W4 = window.IELTS_DATA4 || {};
+  if (W4.TYPE_NAMES) Object.assign(D.TYPE_NAMES, W4.TYPE_NAMES);
+  if (W4.PLANS) Object.assign(D.PLANS, W4.PLANS);
+  var T1ALL = D.TASK1.map(function (t) { return { kind: "table", q: t.q, charts: [{ kind: "table", unit: t.unit, cols: t.cols, rows: t.rows }] }; }).concat(W4.TASK1X || []);
+  var T2ALL = D.TASK2.concat(W4.TASK2X || []);
+  var T2TYPES = [["all", "Any type"], ["opinion", "Opinion (agree or disagree)"], ["discussion", "Discuss both views"], ["advdis", "Advantages vs disadvantages"], ["posneg", "Positive or negative development"], ["problem", "Problem and solution / causes"], ["twopart", "Two-part (direct) question"]];
+  function t1List() { var k = ui.write.t1kind || "all"; var l = T1ALL.filter(function (t) { return k === "all" || t.kind === k; }); return l.length ? l : T1ALL; }
+  function t2List() { var k = ui.write.t2type || "all"; var l = T2ALL.filter(function (t) { return k === "all" || t.type === k; }); return l.length ? l : T2ALL; }
   function currentWritePrompt() {
     var w = ui.write;
     if (w.custom && w.custom.task === w.task) return w.custom;
-    if (w.task === 1) { var t1 = D.TASK1[w.p1 % D.TASK1.length]; return { task: 1, type: "task1", q: t1.q, cols: t1.cols, rows: t1.rows, unit: t1.unit }; }
-    var t2 = D.TASK2[w.pi % D.TASK2.length]; return { task: 2, type: t2.type, q: t2.q };
+    if (w.task === 1) { var l = t1List(), t1 = l[w.p1 % l.length]; return { task: 1, type: "task1", kind: t1.kind, q: t1.q, charts: t1.charts }; }
+    var l2 = t2List(), t2 = l2[w.pi % l2.length]; return { task: 2, type: t2.type, q: t2.q };
   }
+  function promptCharts(p) { return p.charts || (p.cols ? [{ kind: "table", unit: p.unit, cols: p.cols, rows: p.rows }] : []); }
+  function planFor(p) {
+    if (p.task === 1) return D.PLANS[p.kind === "process" ? "task1_process" : p.kind === "map" ? "task1_map" : "task1_trend"] || D.PLANS.task1;
+    return D.PLANS[p.type] || D.PLANS.opinion;
+  }
+  function typeLabel(p) { return p.task === 1 ? (D.TYPE_NAMES["task1_" + (p.kind || "table")] || "Academic Task 1") : (D.TYPE_NAMES[p.type] || "Task 2"); }
+  function chartText(p) {
+    return promptCharts(p).map(function (c) {
+      if (c.kind === "process") return "PROCESS STAGES:\n" + c.steps.map(function (s, i) { return (i + 1) + ". " + s; }).join("\n");
+      if (c.kind === "map") return c.maps.map(function (m) { return "MAP " + m.title + " (rows from north to south):\n" + m.grid.map(function (r) { return r.join(" | "); }).join("\n"); }).join("\n");
+      return (c.kind || "table").toUpperCase() + " DATA (" + (c.unit || "") + "):\n" + [c.cols].concat(c.rows).map(function (r) { return r.join(" | "); }).join("\n");
+    }).join("\n\n");
+  }
+  var PAL = ["var(--accent)", "#d08a2e", "#6a7fd1", "#c25b7a", "#4aa3a8", "#8c8c3c"];
+  function lineSvg(c) {
+    var W = 340, H = 200, L = 34, R = 18, T = 12, B = 26, xs = c.cols.slice(1), vals = [];
+    c.rows.forEach(function (r) { r.slice(1).forEach(function (v) { vals.push(+v); }); });
+    var hi = niceMax(Math.max.apply(null, vals)), lo = 0;
+    var x = function (i) { return L + i * (W - L - R) / Math.max(1, xs.length - 1); }, y = function (v) { return T + (hi - v) / (hi - lo) * (H - T - B); };
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Line graph">';
+    for (var g = 0; g <= 4; g++) { var gv = lo + (hi - lo) * g / 4; s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + (Math.round(gv * 10) / 10) + '</text>'; }
+    xs.forEach(function (t, i) { s += '<text x="' + x(i) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="9" fill="var(--muted)">' + esc(t) + '</text>'; });
+    c.rows.forEach(function (r, ri) { var col = PAL[ri % PAL.length]; s += '<polyline fill="none" stroke="' + col + '" stroke-width="2" points="' + r.slice(1).map(function (v, i) { return x(i) + "," + y(+v); }).join(" ") + '"/>' + r.slice(1).map(function (v, i) { return '<circle cx="' + x(i) + '" cy="' + y(+v) + '" r="2.5" fill="' + col + '"/>'; }).join(""); });
+    return s + '</svg>' + legend(c.rows.map(function (r) { return r[0]; }));
+  }
+  function barSvg(c) {
+    var W = 340, H = 200, L = 34, R = 10, T = 12, B = 34, groups = c.rows, series = c.cols.slice(1), vals = [];
+    groups.forEach(function (r) { r.slice(1).forEach(function (v) { vals.push(+v); }); });
+    var hi = niceMax(Math.max.apply(null, vals)), gw = (W - L - R) / groups.length, bw = Math.min(22, (gw - 8) / series.length);
+    var y = function (v) { return T + (hi - v) / hi * (H - T - B); };
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Bar chart">';
+    for (var g = 0; g <= 4; g++) { var gv = hi * g / 4; s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + Math.round(gv) + '</text>'; }
+    groups.forEach(function (r, gi) {
+      var gx = L + gi * gw + (gw - bw * series.length) / 2;
+      r.slice(1).forEach(function (v, si) { s += '<rect x="' + (gx + si * bw) + '" y="' + y(+v) + '" width="' + (bw - 2) + '" height="' + (y(0) - y(+v)) + '" rx="2" fill="' + PAL[si % PAL.length] + '"/>'; });
+      s += '<text x="' + (L + gi * gw + gw / 2) + '" y="' + (H - 18) + '" text-anchor="middle" font-size="9" fill="var(--muted)">' + esc(String(r[0]).slice(0, 14)) + '</text>';
+    });
+    return s + '</svg>' + (series.length > 1 ? legend(series) : "");
+  }
+  function pieSvg(c) {
+    var years = c.cols.slice(1), h = '<div class="pies">';
+    years.forEach(function (yr, yi) {
+      var tot = c.rows.reduce(function (a, r) { return a + (+r[yi + 1]); }, 0), ang = -Math.PI / 2, s = '<svg viewBox="0 0 120 120" role="img" aria-label="Pie chart ' + esc(yr) + '">';
+      c.rows.forEach(function (r, ri) {
+        var v = +r[yi + 1], a2 = ang + v / tot * Math.PI * 2, large = a2 - ang > Math.PI ? 1 : 0;
+        var p1 = [60 + 52 * Math.cos(ang), 60 + 52 * Math.sin(ang)], p2 = [60 + 52 * Math.cos(a2), 60 + 52 * Math.sin(a2)], mid = (ang + a2) / 2;
+        s += '<path d="M60,60 L' + p1.join(",") + ' A52,52 0 ' + large + ',1 ' + p2.join(",") + ' Z" fill="' + PAL[ri % PAL.length] + '" stroke="var(--surface)" stroke-width="1.5"/>';
+        if (v / tot > 0.06) s += '<text x="' + (60 + 34 * Math.cos(mid)) + '" y="' + (63 + 34 * Math.sin(mid)) + '" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">' + v + '%</text>';
+        ang = a2;
+      });
+      h += '<figure>' + s + '</svg><figcaption>' + esc(yr) + '</figcaption></figure>';
+    });
+    return h + '</div>' + legend(c.rows.map(function (r) { return r[0]; }));
+  }
+  function niceMax(v) { var m = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1e-9)))), steps = [1, 2, 2.5, 5, 10]; for (var i = 0; i < steps.length; i++) { var s = steps[i] * m / 4 * 4; if (s >= v * 1.05) return s; } return 10 * m; }
+  function legend(names) { return '<div class="clegend">' + names.map(function (n, i) { return '<span><i style="background:' + PAL[i % PAL.length] + '"></i>' + esc(n) + '</span>'; }).join("") + '</div>'; }
   function tableHtml(p) {
-    if (!p.cols) return "";
-    var h = '<div class="tablewrap"><table class="data"><thead><tr>';
-    p.cols.forEach(function (c) { h += "<th>" + esc(c) + "</th>"; });
-    h += "</tr></thead><tbody>";
-    p.rows.forEach(function (r) { h += "<tr>" + r.map(function (c) { return "<td>" + esc(c) + "</td>"; }).join("") + "</tr>"; });
-    return h + '</tbody></table></div><p class="note">Units: ' + esc(p.unit || "") + '. Practice data, made up.</p>';
+    var cs = promptCharts(p); if (!cs.length) return "";
+    return cs.map(function (c) {
+      var h = '<div class="t1chart">';
+      if (c.kind === "line") h += lineSvg(c);
+      else if (c.kind === "bar") h += barSvg(c);
+      else if (c.kind === "pie") h += pieSvg(c);
+      else if (c.kind === "process") h += '<div class="outline flowchart">' + c.steps.map(function (st, i) { return (i ? '<div class="arrow" aria-hidden="true">↓</div>' : "") + '<div class="fbox"><b>' + (i + 1) + '</b> ' + esc(st) + '</div>'; }).join("") + '</div>';
+      else if (c.kind === "map") h += '<div class="maps">' + c.maps.map(function (m) { return '<figure><figcaption>' + esc(m.title) + '</figcaption><div class="mapgrid" style="grid-template-columns:repeat(' + m.grid[0].length + ',1fr)">' + m.grid.map(function (r) { return r.map(function (t) { return '<div class="mland">' + esc(t) + '</div>'; }).join(""); }).join("") + '</div></figure>'; }).join("") + '</div><p class="note center">N ↑</p>';
+      if (c.cols && (c.kind === "table" || !c.kind)) {
+        h += '<div class="tablewrap"><table class="data"><thead><tr>' + c.cols.map(function (x) { return "<th>" + esc(x) + "</th>"; }).join("") + '</tr></thead><tbody>' + c.rows.map(function (r) { return "<tr>" + r.map(function (x) { return "<td>" + esc(x) + "</td>"; }).join("") + "</tr>"; }).join("") + '</tbody></table></div>';
+      }
+      if (c.unit) h += '<p class="note">Units: ' + esc(c.unit) + '. Practice data, made up.</p>';
+      return h + '</div>';
+    }).join("");
   }
   function statsHtml(t, task) {
     var s = textStats(t), min = task === 1 ? 150 : 250;
@@ -820,9 +1056,10 @@
     }
     var p = currentWritePrompt();
     var h = '<section class="card"><div class="row between"><h2>Writing</h2><div class="seg" style="min-width:180px"><button data-act="wTask" data-n="1" aria-pressed="' + (w.task === 1) + '">Task 1<span>20 min</span></button><button data-act="wTask" data-n="2" aria-pressed="' + (w.task === 2) + '">Task 2<span>40 min</span></button></div></div>';
-    h += '<span class="chip quiet" style="justify-self:start">' + esc(D.TYPE_NAMES[p.type] || "Task " + p.task) + '</span><div class="prompt">' + esc(p.q) + '</div>' + tableHtml(p);
+    h += '<label class="field">Question type<select data-ch="' + (w.task === 1 ? "t1kind" : "t2type") + '">' + (w.task === 1 ? W4.T1KINDS || [["all", "Any type"]] : T2TYPES).map(function (o) { var cur = w.task === 1 ? (w.t1kind || "all") : (w.t2type || "all"); return '<option value="' + o[0] + '"' + (cur === o[0] ? " selected" : "") + '>' + esc(o[1]) + '</option>'; }).join("") + '</select></label>';
+    h += '<span class="chip quiet" style="justify-self:start">' + esc(typeLabel(p)) + '</span><div class="prompt">' + esc(p.q) + '</div>' + tableHtml(p);
     h += '<div class="row"><button class="btn ghost small" data-act="nextPrompt">Another question</button>' + (aiReady() ? '<button class="btn ghost small" data-act="aiPrompt"' + (ui.busy ? " disabled" : "") + '>New question with AI</button>' : "") + '<button class="btn ghost small" data-act="togglePlan">' + (w.plan ? "Hide" : "Show") + ' plan</button></div>' + busyBlock("aiPrompt");
-    if (w.plan) h += '<ol class="plan">' + (D.PLANS[p.type] || D.PLANS.opinion).map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") + '</ol>';
+    if (w.plan) h += '<ol class="plan">' + planFor(p).map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") + '</ol>';
     h += '</section>';
 
     h += '<section class="card"><div class="row between"><span data-timer="write" class="timer">40:00</span><div class="row"><button class="btn ghost small" data-act="wTimer" data-op="start">Start</button><button class="btn ghost small" data-act="wTimer" data-op="pause">Pause</button><button class="btn ghost small" data-act="wTimer" data-op="reset">Reset</button></div></div>';
@@ -870,6 +1107,8 @@
       if (sp.part === 3) h += '<div class="prompt"><b>Part 3 discussion</b><ol class="plan">' + cue.p3.map(function (q) { return "<li>" + esc(q) + "</li>"; }).join("") + '</ol></div>';
       h += '<div class="row"><button class="btn ghost small" data-act="nextCue">Another topic</button>' + (canSay() && sp.part === 3 ? '<button class="btn ghost small" data-act="sayP3">' + ICON.sound + ' Hear the questions</button>' : "") + '</div>';
     }
+    var fw = ((window.IELTS_DATA4 || {}).SPEAK_TYPES || {})[sp.part] || [];
+    if (fw.length) h += '<details class="frames"><summary class="textbtn">Answer frameworks for Part ' + sp.part + ' question types (' + fw.length + ')</summary>' + fw.map(function (f) { return '<div class="frame"><b>' + esc(f.t) + '</b><span>' + esc(f.how) + '</span><span class="muted small">e.g. ' + esc(f.ex) + '</span>' + (canSay() ? speakBtn(f.ex) : "") + '</div>'; }).join("") + '</details>';
     h += '</section>';
 
     // practice area
@@ -915,70 +1154,165 @@
   }
 
   // ---------------- PRACTICE ----------------
-  var RTYPES = ["True / False / Not Given", "Multiple choice", "Matching headings", "Sentence completion"];
-  var LTYPES = ["Section 1: an everyday conversation (form filling)", "Section 2: a talk about a local service or event", "Section 3: students discussing an assignment", "Section 4: a short academic lecture"];
+  var D4 = window.IELTS_DATA4 || { RQ: [], LQ: [], SAMPLES: [] };
+  var LSECTIONS = ["Section 1: an everyday conversation", "Section 2: a talk about a local service or event", "Section 3: students discussing an assignment", "Section 4: a short academic lecture"];
+  function qtypes(kind) { return kind === "reading" ? D4.RQ : D4.LQ; }
+  function qtypeById(kind, id) { return qtypes(kind).filter(function (t) { return t.id === id; })[0]; }
+  function typeName(kind, id) { var t = qtypeById(kind, id); return t ? t.name : String(id || ""); }
+  function groupsOf(d) {
+    if (!d) return [];
+    if (d.groups && d.groups.length) return d.groups;
+    return [{ type: d.type, instructions: d.instructions, questions: d.questions || [] }];
+  }
+  function allQs(d) { var out = []; groupsOf(d).forEach(function (g, gi) { (g.questions || []).forEach(function (q, i) { out.push({ g: g, q: q, key: gi + "-" + i }); }); }); return out; }
+  function groupTypeName(d, g) { return typeName(d.kind, g.type) || d.type; }
+  // weakest question type first, so "Practise my weakest" can pick it
+  function typeAccuracy(kind) {
+    var by = {}; drills().filter(function (x) { return x.kind === kind; }).forEach(function (x) { var k = x.type; by[k] = by[k] || { s: 0, t: 0 }; by[k].s += x.score; by[k].t += x.total; });
+    return by;
+  }
+  function weakestType(kind) {
+    var by = typeAccuracy(kind), list = qtypes(kind).slice();
+    var untried = list.filter(function (t) { return !by[t.name]; });
+    if (untried.length) return untried[0].id;
+    list.sort(function (a, b) { return by[a.name].s / by[a.name].t - by[b.name].s / by[b.name].t; });
+    return list[0] ? list[0].id : "mixed";
+  }
   function viewPractice() {
-    var p = ui.practice;
+    var p = ui.practice, types = qtypes(p.kind), cur = p.kind === "reading" ? p.rtype : p.ltype;
     var h = '<section class="card"><h2>Reading and Listening drills</h2><div class="seg"><button data-act="pKind" data-k="reading" aria-pressed="' + (p.kind === "reading") + '">Reading</button><button data-act="pKind" data-k="listening" aria-pressed="' + (p.kind === "listening") + '">Listening</button></div>';
-    if (p.kind === "reading") {
-      h += '<label class="field">Question type<select data-ch="rtype">' + RTYPES.map(function (t) { return '<option' + (t === p.rtype ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label>';
-    } else {
-      h += '<label class="field">Section<select data-ch="ltype">' + LTYPES.map(function (t) { return '<option' + (t === p.ltype ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label><label class="choice"><input type="checkbox" data-ch="exam"' + (p.exam ? " checked" : "") + '> Exam mode: play the recording once only</label>';
-    }
+    h += '<label class="field">Question type (' + types.length + ' official types)<select data-ch="' + (p.kind === "reading" ? "rtype" : "ltype") + '"><option value="mixed"' + (cur === "mixed" ? " selected" : "") + '>Mixed exam-style set (3 types)</option>' + types.map(function (t) { return '<option value="' + t.id + '"' + (t.id === cur ? " selected" : "") + '>' + esc(t.name) + '</option>'; }).join("") + '</select></label>';
+    var tt = qtypeById(p.kind, cur);
+    h += '<div class="tipbox"><b>' + esc(tt ? tt.name : "Mixed set") + '</b><span>' + esc(tt ? tt.tip : "Like the real test: one passage or recording with several question types. Read each instruction and word limit carefully.") + '</span></div>';
+    if (p.kind === "listening") h += '<label class="field">Section<select data-ch="lsec">' + LSECTIONS.map(function (t) { return '<option' + (t === p.lsec ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label><label class="choice"><input type="checkbox" data-ch="exam"' + (p.exam ? " checked" : "") + '> Exam mode: play the recording once only</label>';
     h += '<label class="field">Topic (optional)<input type="text" data-in="ptopic" value="' + esc(p.topic) + '" placeholder="e.g. urban farming, sleep science, a museum tour"></label>';
-    if (aiReady()) h += '<button class="btn wide" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Create a new ' + p.kind + ' drill</button><p class="note">Every new drill is also saved below, so you can practise it later offline.</p>';
-    else h += aiNote();
+    if (aiReady()) {
+      h += '<div class="grid2"><button class="btn" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Create this drill</button><button class="btn ghost" data-act="genWeakest"' + (ui.busy ? " disabled" : "") + '>Practise my weakest type</button></div>';
+      h += '<p class="note">Every new drill is saved below, so you can repeat it offline.</p><button class="btn ghost wide" data-act="prepOffline"' + (ui.busy ? " disabled" : "") + '>Prepare 4 drills for offline (2 Reading, 2 Listening)</button>' + (ui.prep ? '<p class="note">Saving drill ' + ui.prep + ' of 4…</p>' : "") + busyBlock("prepOffline");
+    } else h += aiNote();
     h += busyBlock("genDrill") + '</section>';
     if (p.data && p.data.kind === p.kind) h += p.kind === "reading" ? readingHtml() : listeningHtml();
+    var samples = D4.SAMPLES.filter(function (s) { return s.kind === p.kind; });
+    if (samples.length) {
+      h += '<section class="card"><h2>Built-in ' + p.kind + ' sets</h2><p class="note">Always available offline. Together they cover every ' + p.kind + ' question type.</p><div class="hist">';
+      samples.forEach(function (s) {
+        var sc = (get("samplescores") || {})[s.id];
+        h += '<button data-act="openSample" data-id="' + s.id + '"><span class="chip ' + (sc ? "" : "quiet") + '">' + (sc ? sc : "new") + '</span><span class="grow">' + esc(s.title) + '<span class="note block">' + esc(groupsOf(s).map(function (g) { return groupTypeName(s, g); }).join(" · ")) + '</span></span></button>';
+      });
+      h += '</div></section>';
+    }
     var bank = drillBank().filter(function (b) { return b.data.kind === p.kind; });
     if (bank.length) {
       h += '<section class="card"><h2>Saved ' + p.kind + ' drills (' + bank.length + ')</h2><p class="note">These work offline. Generate a few while you have internet, then practise on the bus.</p><div class="hist">';
-      bank.forEach(function (b) { h += '<button data-act="openDrill" data-id="' + esc(b.id) + '"><span class="chip ' + (b.score != null ? "" : "quiet") + '">' + (b.score != null ? b.score + "/" + b.total : "new") + '</span><span class="grow">' + esc(b.data.title) + '</span><span class="note">' + esc(short(b.date)) + '</span></button>'; });
+      bank.forEach(function (b) { h += '<button data-act="openDrill" data-id="' + esc(b.id) + '"><span class="chip ' + (b.score != null ? "" : "quiet") + '">' + (b.score != null ? b.score + "/" + b.total : "new") + '</span><span class="grow">' + esc(b.data.title) + '<span class="note block">' + esc(groupsOf(b.data).map(function (g) { return groupTypeName(b.data, g); }).join(" · ")) + '</span></span><span class="note">' + esc(short(b.date)) + '</span></button>'; });
       h += '</div></section>';
     }
     h += drillStatsHtml();
     return h;
   }
-  function questionsHtml(qs) {
-    var p = ui.practice, h = "";
-    qs.forEach(function (q, i) {
-      var cls = "q", ok = null;
-      if (p.checked) { ok = answerOk(q, p.answers[i]); cls += ok ? " right" : " wrong"; }
-      h += '<div class="' + cls + '"><div class="qt">' + (i + 1) + '. ' + esc(q.q) + '</div>';
-      if (q.options && q.options.length) {
-        q.options.forEach(function (o, j) {
-          h += '<label class="choice"><input type="radio" name="q' + i + '" data-ch="ans" data-q="' + i + '" value="' + esc(o) + '"' + (p.answers[i] === o ? " checked" : "") + (p.checked ? " disabled" : "") + '><span>' + esc(o) + '</span></label>';
-        });
-      } else {
-        h += '<input type="text" data-in="ans" data-q="' + i + '" value="' + esc(p.answers[i] || "") + '"' + (p.checked ? " disabled" : "") + ' placeholder="Your answer" autocomplete="off" spellcheck="false">';
-      }
-      if (p.checked) h += '<div class="expl"><b>' + (ok ? "Correct" : "Answer: " + esc(q.answer)) + '.</b> ' + esc(q.explanation || "") + '</div>';
-      h += '</div>';
-    });
-    return h;
-  }
-  function answerOk(q, a) {
+  function choiceKey(s) { var m = /^\s*([A-Za-z]|[ivx]+)[\s.)]/.exec(String(s || "")); return m ? m[1].toLowerCase() : norm(s); }
+  function sameChoice(a, ans) { return choiceKey(a) === choiceKey(ans) || norm(a) === norm(ans); }
+  function answerOk(q, a, g) {
     if (a == null || a === "") return false;
+    var hasChoices = (q.options && q.options.length) || (g && g.options && g.options.length);
+    if (Array.isArray(q.answer)) {
+      var chosen = Array.isArray(a) ? a : [a];
+      if (chosen.length !== q.answer.length) return false;
+      return q.answer.every(function (x) { return chosen.some(function (c) { return sameChoice(c, x); }); });
+    }
+    if (hasChoices) return sameChoice(a, q.answer);
     var acc = [q.answer].concat(q.alt || []).map(norm);
     return acc.indexOf(norm(a)) !== -1;
   }
+  function ansLabel(q) { return Array.isArray(q.answer) ? q.answer.join(" and ") : String(q.answer); }
+  function inputFor(g, q, key, inline) {
+    var p = ui.practice, val = p.answers[key], dis = p.checked ? " disabled" : "";
+    var opts = q.options && q.options.length ? q.options : (g.options || []);
+    if (Array.isArray(q.answer)) {
+      var arr = Array.isArray(val) ? val : [];
+      return '<p class="note">Choose ' + q.answer.length + '.</p>' + opts.map(function (o) { return '<label class="choice"><input type="checkbox" data-ch="ansm" data-q="' + key + '" value="' + esc(o) + '"' + (arr.indexOf(o) !== -1 ? " checked" : "") + dis + '><span>' + esc(o) + '</span></label>'; }).join("");
+    }
+    if (q.options && q.options.length) {
+      return q.options.map(function (o) { return '<label class="choice"><input type="radio" name="q' + key + '" data-ch="ans" data-q="' + key + '" value="' + esc(o) + '"' + (val === o ? " checked" : "") + dis + '><span>' + esc(o) + '</span></label>'; }).join("");
+    }
+    if (opts.length) {
+      return '<select class="' + (inline ? "inl" : "") + '" data-ch="ans" data-q="' + key + '"' + dis + ' aria-label="Answer"><option value="">' + (inline ? "–" : "Choose…") + '</option>' + opts.map(function (o) { return '<option value="' + esc(o) + '"' + (val === o ? " selected" : "") + '>' + esc(inline ? choiceKey(o).toUpperCase() : o) + '</option>'; }).join("") + '</select>';
+    }
+    return '<input type="text" class="' + (inline ? "inl" : "") + '" data-in="ans" data-q="' + key + '" value="' + esc(val || "") + '"' + dis + ' placeholder="' + (inline ? "" : "Your answer") + '" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Answer">';
+  }
+  function outlineHtml(g, gi, base) {
+    var o = g.outline, st = o.style || "notes", p = ui.practice;
+    var fill = function (cell) {
+      return esc(cell).replace(/\[(\d+)\]/g, function (m, n) {
+        var i = +n - 1, q = (g.questions || [])[i]; if (!q) return m;
+        var key = gi + "-" + i, mark = "";
+        if (p.checked) mark = answerOk(q, p.answers[key], g) ? ' ok' : ' bad';
+        return '<span class="gapin' + mark + '"><b>' + (base + i + 1) + '</b>' + inputFor(g, q, key, true) + '</span>';
+      });
+    };
+    var h = '<div class="outline ' + st + '">' + (o.title ? '<b>' + esc(o.title) + '</b>' : "");
+    if (st === "table") {
+      var hd = o.rows[0] || [];
+      h += o.rows.slice(1).map(function (r) { return '<div class="trow"><div class="trh">' + fill(r[0]) + '</div>' + r.slice(1).map(function (c, ci) { return '<div class="frow"><span class="muted small">' + esc(hd[ci + 1] || "") + '</span><span>' + fill(c) + '</span></div>'; }).join("") + '</div>'; }).join("");
+    } else if (st === "form") {
+      h += o.rows.map(function (r) { return '<div class="frow"><span>' + fill(r[0]) + '</span><span>' + fill(r.slice(1).join(" ")) + '</span></div>'; }).join("");
+    } else if (st === "flowchart") {
+      h += o.rows.map(function (r, i) { return (i ? '<div class="arrow" aria-hidden="true">↓</div>' : "") + '<div class="fbox">' + fill(r.join(" ")) + '</div>'; }).join("");
+    } else {
+      h += o.rows.map(function (r) { return '<p>' + fill(r.join(" ")) + '</p>'; }).join("");
+    }
+    return h + '</div>';
+  }
+  function mapHtml(m) {
+    var cells = {}; (m.cells || []).forEach(function (c) { cells[c.r + "," + c.c] = c.t; });
+    var h = '<div class="mapgrid" style="grid-template-columns:repeat(' + (m.cols || 3) + ',1fr)">';
+    for (var r = 0; r < (m.rows || 3); r++) for (var c = 0; c < (m.cols || 3); c++) {
+      var t = cells[r + "," + c] || "";
+      h += '<div class="' + (/^[A-H]$/.test(t) ? "mletter" : "mland") + '">' + esc(t) + '</div>';
+    }
+    return h + '</div><p class="note center">N ↑</p>';
+  }
+  function groupsHtml(d) {
+    var p = ui.practice, h = "", base = 0;
+    groupsOf(d).forEach(function (g, gi) {
+      var qs = g.questions || [], from = base + 1, to = base + qs.length;
+      h += '<div class="qgroup"><div class="qghead"><b>Questions ' + from + (to > from ? "–" + to : "") + '</b><span class="chip quiet">' + esc(groupTypeName(d, g)) + '</span></div>' + (g.instructions ? '<p class="note">' + esc(g.instructions) + '</p>' : "");
+      if (g.map) h += mapHtml(g.map);
+      if (g.outline) {
+        if (g.options && g.options.length && !g.map) h += '<div class="wordbox">' + g.options.map(function (o) { return '<span>' + esc(o) + '</span>'; }).join("") + '</div>';
+        h += outlineHtml(g, gi, base);
+        if (p.checked) h += qs.map(function (q, i) { var ok = answerOk(q, p.answers[gi + "-" + i], g); return '<div class="expl ' + (ok ? "r" : "w") + '"><b>' + (base + i + 1) + '. ' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q))) + '.</b> ' + esc(q.explanation || "") + '</div>'; }).join("");
+      } else {
+        if (g.options && g.options.length && !g.map && !qs.some(function (q) { return q.options; })) h += '<div class="wordbox list">' + g.options.map(function (o) { return '<span>' + esc(o) + '</span>'; }).join("") + '</div>';
+        qs.forEach(function (q, i) {
+          var key = gi + "-" + i, cls = "q", ok = null;
+          if (p.checked) { ok = answerOk(q, p.answers[key], g); cls += ok ? " right" : " wrong"; }
+          h += '<div class="' + cls + '"><div class="qt">' + (base + i + 1) + '. ' + esc(q.q) + '</div>' + inputFor(g, q, key, false);
+          if (p.checked) h += '<div class="expl"><b>' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q))) + '.</b> ' + esc(q.explanation || "") + '</div>';
+          h += '</div>';
+        });
+      }
+      h += '</div>';
+      base = to;
+    });
+    return h;
+  }
   function readingHtml() {
     var p = ui.practice, d = p.data;
-    var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div><div class="passage">';
+    var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div><p class="note">Aim for about 20 minutes per passage, as in the real test.</p><div class="passage">';
     (d.paragraphs || []).forEach(function (pg) { h += '<p><b>' + esc(pg.label) + '</b>' + esc(pg.text) + '</p>'; });
-    h += '</div></section><section class="card"><h2>Questions</h2>' + (d.instructions ? '<p class="note">' + esc(d.instructions) + '</p>' : "") + questionsHtml(d.questions || []);
-    h += checkRow() + '</section>';
+    h += '</div></section><section class="card"><h2>Questions</h2>' + groupsHtml(d) + checkRow() + '</section>';
     return h;
   }
   function listeningHtml() {
     var p = ui.practice, d = p.data;
     var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div><p class="note">' + esc(d.context || "") + '</p>';
-    if (!canSay()) h += '<p class="note">Audio isn’t available in this view. Read the transcript instead, then answer from memory.</p>';
+    if (!canSay()) h += '<p class="note">Audio isn’t available here. Read the transcript instead, then answer from memory.</p>';
     else {
       var locked = p.exam && p.plays >= 1 && !p.checked;
       h += '<div class="row"><button class="btn" data-act="playL"' + (p.playing || locked ? " disabled" : "") + '>' + ICON.sound + (p.plays ? " Play again" : " Play recording") + '</button>' + (p.playing ? '<button class="btn ghost" data-act="stopL">Stop</button>' : "") + '</div>' + (locked ? '<p class="note">Exam mode: you’ve heard it once. Check your answers to unlock replay and the transcript.</p>' : "");
     }
-    h += '<p class="note">Read the questions first, as you would in the test. Answers are NO MORE THAN TWO WORDS AND/OR A NUMBER. Spelling counts.</p>' + questionsHtml(d.questions || []) + checkRow();
+    h += '<p class="note">Read all the questions first, as you would in the test. Spelling counts.</p>' + groupsHtml(d) + checkRow();
     if (p.checked || !canSay()) {
       h += '<details' + (p.script ? " open" : "") + '><summary class="textbtn">Show transcript</summary><div class="passage">';
       (d.lines || []).forEach(function (l) { h += '<p><b>' + esc(l.speaker) + ':</b> ' + esc(l.text) + '</p>'; });
@@ -986,22 +1320,24 @@
     }
     return h + '</section>';
   }
+  function drillScore(d) { var p = ui.practice; return allQs(d).filter(function (x) { return answerOk(x.q, p.answers[x.key], x.g); }).length; }
   function checkRow() {
     var p = ui.practice;
     if (!p.checked) return '<button class="btn wide" data-act="checkDrill">Check answers</button>';
-    var qs = p.data.questions || [], sc = qs.filter(function (q, i) { return answerOk(q, p.answers[i]); }).length;
-    return '<div class="bandbig"><b>' + sc + '/' + qs.length + '</b><span class="muted">correct · wrong answers saved to your mistake log</span></div><button class="btn" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Next drill</button>';
+    var tot = allQs(p.data).length, sc = drillScore(p.data);
+    return '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">correct (' + Math.round(100 * sc / Math.max(1, tot)) + '%) · wrong answers saved to your mistake log</span></div>' + (aiReady() ? '<button class="btn" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Next drill</button>' : "");
   }
   function drillStatsHtml() {
     var list = drills(); if (!list.length) return "";
     var by = {};
-    list.forEach(function (d) { var k = (d.kind === "listening" ? "Listening · " : "Reading · ") + d.type.split(":")[0]; by[k] = by[k] || { s: 0, t: 0, n: 0 }; by[k].s += d.score; by[k].t += d.total; by[k].n++; });
+    list.forEach(function (d) { var k = (d.kind === "listening" ? "Listening · " : "Reading · ") + String(d.type).split(":")[0]; by[k] = by[k] || { s: 0, t: 0, n: 0 }; by[k].s += d.score; by[k].t += d.total; by[k].n++; });
     var h = '<section class="card"><h2>Accuracy by question type</h2><div class="typebars">';
     Object.keys(by).sort(function (a, b) { return by[a].s / by[a].t - by[b].s / by[b].t; }).forEach(function (k) {
       var pc = Math.round(100 * by[k].s / Math.max(1, by[k].t));
-      h += '<div><div class="row"><span>' + esc(k) + '</span><b class="num">' + pc + '%</b><span class="note">' + plural(by[k].n, "drill") + '</span></div><div class="bar' + (pc < 70 ? " warn" : "") + '"><i style="width:' + pc + '%"></i></div></div>';
+      h += '<div><div class="row"><span>' + esc(k) + '</span><b class="num">' + pc + '%</b><span class="note">' + by[k].t + ' questions</span></div><div class="bar' + (pc < 70 ? " warn" : "") + '"><i style="width:' + pc + '%"></i></div></div>';
     });
-    return h + '</div><p class="note">The lowest bar is the question type to practise next.</p></section>';
+    var untried = ["reading", "listening"].map(function (k) { var by2 = typeAccuracy(k); return qtypes(k).filter(function (t) { return !by2[t.name]; }).length; });
+    return h + '</div><p class="note">The lowest bar is the type to practise next.' + (untried[0] + untried[1] ? ' Not tried yet: ' + untried[0] + ' Reading and ' + untried[1] + ' Listening types.' : " You have tried every type.") + '</p></section>';
   }
 
   // ---------------- PROGRESS ----------------
@@ -1075,7 +1411,8 @@
     }
 
     // backup
-    h += '<section class="card"><h2>Backup and offline use</h2><p class="note">' + (window.claude ? "Your progress saves to your Claude account." : "This offline copy saves on this device only.") + ' To move progress between the Claude version and the offline app, tap Copy backup on one, then Restore on the other. Restoring merges: nothing is lost.</p>' + (installEvt ? '<button class="btn" data-act="installApp">Install as an app</button>' : "") + '<div class="grid2"><button class="btn ghost" data-act="copyBackup">Copy backup</button><button class="btn ghost" data-act="showRestore">Restore from backup</button></div>';
+    var lastB = 0; try { lastB = +localStorage.getItem("ielts-last-backup") || 0; } catch (e) {}
+    h += '<section class="card"><h2>Backup and offline use</h2>' + (!window.claude ? '<p class="note">' + (persisted === true ? "✓ Storage is protected: the phone won’t clear your progress to free space." : persisted === false ? "Storage isn’t protected yet. Install the app to the home screen so the phone keeps your data." : "") + ' Last backup: ' + (lastB ? Math.round((Date.now() - lastB) / 864e5) + " days ago" : "never") + '.</p>' : "") + (!canSay() || (!TTS && !hasLocalVoice()) ? '<p class="note">Pronunciation offline: install an English voice in your phone settings (Android: Settings → Text-to-speech → Google → Install voice data → English UK).</p>' : "") + '<button class="btn ghost wide" data-act="downloadBackup">Save backup file</button><p class="note">' + (window.claude ? "Your progress saves to your Claude account." : "This offline copy saves on this device only.") + ' To move progress between the Claude version and the offline app, tap Copy backup on one, then Restore on the other. Restoring merges: nothing is lost.</p>' + (installEvt ? '<button class="btn" data-act="installApp">Install as an app</button>' : "") + '<div class="grid2"><button class="btn ghost" data-act="copyBackup">Copy backup</button><button class="btn ghost" data-act="showRestore">Restore from backup</button></div>';
     if (pr.backupText) h += '<textarea rows="4" readonly aria-label="Backup text">' + esc(pr.backupText) + '</textarea><p class="note">Copying was blocked here. Select the text above and copy it yourself.</p>';
     if (pr.restore) h += '<textarea rows="4" data-in="restoreText" placeholder="Paste a backup here" aria-label="Backup to restore">' + esc(pr.restoreText) + '</textarea><button class="btn" data-act="doRestore">Restore (adds to what you have)</button>';
     return h + '</section>';
@@ -1117,18 +1454,36 @@
 
     // cards
     deck: function (el) { ui.cards.deck = el.getAttribute("data-deck"); ui.cards.showAll = false; render(); },
+    setDeck: function (el) { ui.cards.deck = el.getAttribute("data-v"); render(); },
+    setLevel: function (el) { ui.cards.level = el.getAttribute("data-v"); render(); },
     mode: function (el) {
       var m = el.getAttribute("data-m");
-      if (m === "browse") { ui.cards.mode = "browse"; render(); return; }
+      if (m === "browse") { ui.cards.mode = "browse"; ui.cards.showAll = false; render(); window.scrollTo(0, 0); return; }
       if (m === "spell") return startSpell();
       if (m === "quiz") return startQuiz();
       if (m === "match") return startMatch();
+      if (m === "cloze") return startCloze();
+      if (m === "difficult") {
+        var s = srs(), ids = deckCards(ui.cards.deck).filter(function (c) { var st = s.cards[c.id]; return st && (st.lapses || 0) >= 2; }).map(function (c) { return c.id; });
+        if (!ids.length) { toast("No difficult words yet. Words you forget twice will collect here."); return; }
+        return startSession(shuffle(ids).slice(0, 40));
+      }
     },
+    clearFilters: function () { ui.cards.b = { deck: "all", level: "all", status: "all", pos: "all" }; ui.cards.search = ""; render(); },
+    studyFiltered: function () { var ids = filterCards(browseFilter()).map(function (c) { return c.id; }); var s = srs(); ids.sort(function (a, b) { return ((s.cards[a] || {}).due || 0) - ((s.cards[b] || {}).due || 0); }); startSession(ids.slice(0, 40)); },
+    drillFiltered: function (el) {
+      var pool = filterCards(browseFilter()), m = el.getAttribute("data-m");
+      if (m === "cloze") return startCloze(pool);
+      if (m === "quiz") return startQuiz(pool);
+      if (m === "match") return startMatch(pool);
+    },
+    clozeCheck: function () { clozeCheck(); },
+    clozeHint: function () { ui.cards.cloze.hint = true; render(); var i = $("clozeInput"); if (i) i.focus(); },
+    clozeNext: function () { var cz = ui.cards.cloze; cz.i++; cz.input = ""; cz.result = null; cz.hint = false; render(); var i = $("clozeInput"); if (i) i.focus(); },
     startReview: function () {
       var q = buildQueue(ui.cards.deck);
-      if (!q.length) { toast("Nothing to review in this deck right now."); return; }
-      ui.cards.mode = "review"; ui.cards.session = { queue: q, i: 0, done: 0, again: 0, revealed: false, bn: false, use: "", check: null }; render();
-      if (autoPlay) say(cardById(q[0]).w);
+      if (!q.length) { toast("Nothing to review here right now."); return; }
+      startSession(q);
     },
     reveal: function () { flipCard(); },
     showBn: function (el) {
@@ -1193,8 +1548,9 @@
       var a = ui.cards.add;
       if (!a.w.trim()) { toast("Type a word first."); return; }
       try {
-        var r = await aiCall("addFill", 'Make an IELTS Academic vocabulary flashcard for the English word or phrase "' + a.w.trim() + '". Reply with only JSON: {"w": "the word in its base form", "pos": "part of speech", "def": "simple English definition, under 15 words", "ex": "one natural IELTS-style example sentence", "bn": "short Bangla meaning", "topic": "one of: ' + Object.keys(D.TOPICS).filter(function (k) { return k !== "mine"; }).join(", ") + '"}', "quick");
-        a.w = r.w || a.w; a.pos = r.pos || ""; a.def = r.def || ""; a.ex = r.ex || ""; a.bn = r.bn || "";
+        var r = await aiCall("addFill", 'Make an IELTS Academic vocabulary flashcard for the English word or phrase "' + a.w.trim() + '". Reply with only JSON: {"w": "the word in its base form", "pos": "part of speech", "def": "simple English definition, under 15 words", "ex": "natural example sentence in an academic IELTS Writing context", "ex2": "second example in an everyday or Speaking context", "ex3": "third example in a different context, e.g. a chart description or news", "lvl": "CEFR level: A2, B1, B2, C1 or C2", "bn": "short Bangla meaning", "topic": "one of: ' + Object.keys(D.TOPICS).filter(function (k) { return k !== "mine"; }).join(", ") + '"}', "quick");
+        a.w = r.w || a.w; a.pos = r.pos || ""; a.def = r.def || ""; a.ex = r.ex || ""; a.ex2 = r.ex2 || ""; a.ex3 = r.ex3 || ""; a.bn = r.bn || "";
+        a.lvl = /^(A2|B1|B2|C1|C2)$/.test(r.lvl) ? r.lvl : "B2";
         a.topic = D.TOPICS[r.topic] ? r.topic : "mine";
         render();
       } catch (e) { aiFail(e); }
@@ -1202,8 +1558,8 @@
     addSave: function () {
       var a = ui.cards.add;
       if (!a.w.trim() || !a.def.trim()) { toast("Add the word and its meaning."); return; }
-      put("c_" + uid(), { w: a.w.trim(), pos: a.pos.trim(), def: a.def.trim(), ex: a.ex.trim(), bn: a.bn.trim(), topic: a.topic || "mine", added: today() });
-      ui.cards.add = { w: "", pos: "", def: "", ex: "", bn: "", topic: "mine" };
+      put("c_" + uid(), { w: a.w.trim(), pos: a.pos.trim(), def: a.def.trim(), ex: a.ex.trim(), ex2: (a.ex2 || "").trim(), ex3: (a.ex3 || "").trim(), lvl: a.lvl || "B2", bn: a.bn.trim(), topic: a.topic || "mine", added: today() });
+      ui.cards.add = { w: "", pos: "", def: "", ex: "", ex2: "", ex3: "", bn: "", topic: "mine", lvl: "B2" };
       toast("Card saved. It joins your next review as a new card."); render();
     },
     cardNow: function (el) {
@@ -1226,11 +1582,22 @@
       var w = ui.write;
       try {
         if (w.task === 2) {
-          var r = await aiCall("aiPrompt", 'Write one new, original IELTS Academic Writing Task 2 question in the style of the real test, on a common IELTS theme (education, environment, technology, work, health, society, cities, crime, media, culture). Avoid these themes this time: ' + D.TASK2.slice(0, 4).map(function (t) { return t.q.split(".")[0]; }).join("; ") + '. Reply with only JSON: {"type": "opinion" | "discussion" | "advdis" | "problem" | "twopart", "q": "the full question including the final instruction sentence"}', "quick");
-          w.custom = { task: 2, type: D.PLANS[r.type] ? r.type : "opinion", q: r.q };
+          var want = w.t2type && w.t2type !== "all" ? w.t2type : null;
+          var r = await aiCall("aiPrompt", 'Write one new, original IELTS Academic Writing Task 2 question in the style of the real test, on a common IELTS theme (education, environment, technology, work, health, society, cities, crime, media, culture). ' + (want ? 'The question type must be: ' + D.TYPE_NAMES[want] + '. ' : "") + 'Avoid these themes this time: ' + T2ALL.slice(0, 6).map(function (t) { return t.q.split(".")[0]; }).join("; ") + '. Reply with only JSON: {"type": "opinion" | "discussion" | "advdis" | "posneg" | "problem" | "twopart", "q": "the full question including the final instruction sentence"}', "quick");
+          w.custom = { task: 2, type: D.PLANS[r.type] ? r.type : (want || "opinion"), q: r.q };
         } else {
-          var r1 = await aiCall("aiPrompt", 'Write one original IELTS Academic Writing Task 1 question based on a small data table (made-up but realistic data). Choose a varied subject (e.g. energy, transport, spending, population, tourism, education). Reply with only JSON: {"q": "the full task text, starting with \\"The table below shows\\" and ending with \\"Summarise the information by selecting and reporting the main features, and make comparisons where relevant.\\"", "unit": "unit of the numbers", "cols": ["first column label", "..."], "rows": [["row label", "number", "..."]]} with 3 to 6 rows and 3 to 5 columns.', "quick");
-          w.custom = { task: 1, type: "task1", q: r1.q, unit: r1.unit, cols: r1.cols, rows: r1.rows };
+          var kinds = ["table", "line", "bar", "pie", "process", "map"], k = w.t1kind && w.t1kind !== "all" ? w.t1kind : kinds[Math.floor(Math.random() * kinds.length)];
+          var shape = {
+            table: '"charts": [{"kind": "table", "unit": "...", "cols": ["first column label", "year or category", "..."], "rows": [["row label", "number", "..."]]}] with 3 to 6 rows',
+            line: '"charts": [{"kind": "line", "unit": "...", "cols": ["Series", "year1", "year2", "...5 or 6 time points"], "rows": [["series name", "number", "..."]]}] with 2 to 4 series',
+            bar: '"charts": [{"kind": "bar", "unit": "...", "cols": ["Category", "group1", "group2"], "rows": [["category", "number", "number"]]}] with 4 to 6 categories',
+            pie: '"charts": [{"kind": "pie", "unit": "%", "cols": ["Category", "year1", "year2"], "rows": [["category", "percent", "percent"]]}] where each year column adds up to exactly 100, with 4 or 5 categories',
+            process: '"charts": [{"kind": "process", "steps": ["stage 1", "..."]}] with 6 to 9 short stages of a natural or manufacturing process',
+            map: '"charts": [{"kind": "map", "maps": [{"title": "earlier year", "grid": [["feature", "feature", "feature"], ["...3 rows of 3 short features"]]}, {"title": "later year or now", "grid": [["..."]]}]}] showing how a town, campus or park changed, with at least 4 changed cells'
+          }[k];
+          var r1 = await aiCall("aiPrompt", 'Write one original IELTS Academic Writing Task 1 question of type: ' + k + '. Use made-up but realistic data on a varied subject (energy, transport, spending, population, tourism, education, environment). Reply with only JSON: {"q": "the full task text in real IELTS wording, ending with the standard instruction to summarise the main features (and make comparisons where relevant, except for a process)", ' + shape + '}', "quick");
+          if (!r1 || !r1.charts || !r1.charts.length) throw { code: "invalid_json" };
+          w.custom = { task: 1, type: "task1", kind: k, q: r1.q, charts: r1.charts };
         }
         render();
       } catch (e) { aiFail(e); }
@@ -1244,7 +1611,7 @@
       var w = ui.write, p = currentWritePrompt(), s = textStats(w.text);
       if (s.words < 60) { toast("Write at least 60 words before marking."); return; }
       var mins = Math.round(tElapsed("write") / 60);
-      var prompt = 'You are a strict, experienced IELTS examiner. Assess this IELTS Academic Writing Task ' + p.task + ' response using the public IELTS band descriptors for ' + (p.task === 1 ? "Task Achievement" : "Task Response") + ', Coherence and Cohesion, Lexical Resource, and Grammatical Range and Accuracy. Score realistically in 0.5 steps; do not inflate. Apply the under-length penalty if it has fewer than ' + (p.task === 1 ? 150 : 250) + ' words.\n\nQUESTION:\n' + p.q + (p.cols ? "\nDATA (" + (p.unit || "") + "):\n" + [p.cols].concat(p.rows).map(function (r) { return r.join(" | "); }).join("\n") : "") + '\n\nRESPONSE (' + s.words + ' words' + (mins ? ', written in about ' + mins + ' minutes' : "") + '):\n' + w.text + '\n\nThe learner is from Bangladesh and is aiming for band ' + settings().target + ' or higher.\nReply with only JSON in exactly this shape:\n{"overall": 6.5, "criteria": [{"name": "' + (p.task === 1 ? "Task Achievement" : "Task Response") + '", "band": 6.5, "comment": "one or two specific sentences"}, {"name": "Coherence and Cohesion", "band": 6.5, "comment": "..."}, {"name": "Lexical Resource", "band": 6.5, "comment": "..."}, {"name": "Grammatical Range and Accuracy", "band": 6.5, "comment": "..."}], "summary": "two sentences on the main reason for this band", "fixes": [{"original": "an exact short phrase or sentence copied from the response", "corrected": "the corrected version", "why": "the rule, in a few words"}], "upgrades": [{"from": "a plain word or phrase the learner used", "to": "a more precise academic alternative", "example": "a short sentence using it"}], "model_intro": "a band-8 rewrite of their introduction (or overview for Task 1)", "next_focus": "one concrete thing to practise next"}\nGive up to 6 fixes (the most important errors) and up to 6 upgrades.';
+      var prompt = 'You are a strict, experienced IELTS examiner. Assess this IELTS Academic Writing Task ' + p.task + ' response using the public IELTS band descriptors for ' + (p.task === 1 ? "Task Achievement" : "Task Response") + ', Coherence and Cohesion, Lexical Resource, and Grammatical Range and Accuracy. Score realistically in 0.5 steps; do not inflate. Apply the under-length penalty if it has fewer than ' + (p.task === 1 ? 150 : 250) + ' words.\n\nQUESTION:\n' + p.q + (p.task === 1 ? "\n" + chartText(p) : "") + '\n\nRESPONSE (' + s.words + ' words' + (mins ? ', written in about ' + mins + ' minutes' : "") + '):\n' + w.text + '\n\nThe learner is from Bangladesh and is aiming for band ' + settings().target + ' or higher.\nReply with only JSON in exactly this shape:\n{"overall": 6.5, "criteria": [{"name": "' + (p.task === 1 ? "Task Achievement" : "Task Response") + '", "band": 6.5, "comment": "one or two specific sentences"}, {"name": "Coherence and Cohesion", "band": 6.5, "comment": "..."}, {"name": "Lexical Resource", "band": 6.5, "comment": "..."}, {"name": "Grammatical Range and Accuracy", "band": 6.5, "comment": "..."}], "summary": "two sentences on the main reason for this band", "fixes": [{"original": "an exact short phrase or sentence copied from the response", "corrected": "the corrected version", "why": "the rule, in a few words"}], "upgrades": [{"from": "a plain word or phrase the learner used", "to": "a more precise academic alternative", "example": "a short sentence using it"}], "model_intro": "a band-8 rewrite of their introduction (or overview for Task 1)", "next_focus": "one concrete thing to practise next"}\nGive up to 6 fixes (the most important errors) and up to 6 upgrades.';
       try {
         var r = await aiCall("grade", prompt, "default");
         w.result = r;
@@ -1333,42 +1700,39 @@
 
     // practice
     pKind: function (el) { ui.practice.kind = el.getAttribute("data-k"); render(); },
-    genDrill: async function () {
-      var p = ui.practice;
-      var topic = p.topic.trim() ? p.topic.trim() : "any typical IELTS academic topic (science, history, society, environment, psychology, technology)";
-      var prompt;
-      if (p.kind === "reading") {
-        var spec = {
-          "True / False / Not Given": 'Each question is a statement. "options" must be exactly ["TRUE", "FALSE", "NOT GIVEN"]. Include at least one of each answer, and make NOT GIVEN items genuinely tricky.',
-          "Multiple choice": 'Each question has 4 options written as "A ...", "B ...", "C ...", "D ...". "answer" is the full text of the correct option exactly as written in options.',
-          "Matching headings": 'Questions are "Paragraph A", "Paragraph B", and so on, one per paragraph. Every question has the same "options": a list of headings written as "i ...", "ii ...", with two more headings than paragraphs. "answer" is the full correct heading exactly as written in options.',
-          "Sentence completion": 'Each question is a sentence with a gap shown as ____. Answers are NO MORE THAN TWO WORDS taken exactly from the passage. Omit "options". Put acceptable variants in "alt".'
-        }[p.rtype];
-        prompt = 'Write an original IELTS Academic Reading practice set.\nTopic: ' + topic + '.\nPassage: 350 to 450 words, formal academic style, 5 paragraphs labelled A to E. Use paraphrase between passage and questions, as the real test does.\nQuestion type: ' + p.rtype + '. ' + spec + '\nWrite 6 questions in passage order (except matching headings).\nReply with only JSON: {"title": "...", "paragraphs": [{"label": "A", "text": "..."}], "instructions": "the IELTS-style instruction line", "questions": [{"q": "...", "options": ["..."], "answer": "...", "alt": [], "explanation": "why, citing the paragraph letter"}]}';
-      } else {
-        prompt = 'Write an original IELTS Listening practice script for ' + p.ltype + '. Topic: ' + topic + '.\nLength: 280 to 380 words of natural spoken English, with small hesitations and at least two typical IELTS distractors (for example a speaker correcting a number, date or spelling, or rejecting the first option mentioned). For Section 1 include one name or word that is spelled out letter by letter.\nThen write 6 gap-fill questions answered with NO MORE THAN TWO WORDS AND/OR A NUMBER, in the order the answers are heard.\nReply with only JSON: {"title": "...", "context": "one line describing the situation", "lines": [{"speaker": "name or role", "text": "one turn of speech"}], "questions": [{"q": "a note or sentence with ____ for the gap", "answer": "...", "alt": ["accepted variants, e.g. numerals vs words"], "explanation": "which line gives the answer and what the distractor was"}]}';
-      }
+    prepOffline: async function () {
+      var plan = [["reading", "mixed"], ["reading", weakestType("reading")], ["listening", "mixed"], ["listening", weakestType("listening")]], made = 0;
       try {
-        var d = await aiCall("genDrill", prompt, "default");
-        if (!d || !d.questions || !d.questions.length) throw { code: "invalid_json" };
-        d.kind = p.kind; d.type = p.kind === "reading" ? p.rtype : p.ltype;
-        p.bankId = saveToBank(d);
-        stopSay();
-        p.data = d; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false;
-        tSet("practice", 0, "up"); if (p.kind === "reading") tStart("practice");
-        render();
-      } catch (e) { aiFail(e); }
+        for (var i = 0; i < plan.length; i++) {
+          ui.prep = i + 1;
+          var d = await aiCall("prepOffline", drillPrompt(plan[i][0], plan[i][1], "", LSECTIONS[(i * 2 + new Date().getDate()) % 4]), "default");
+          if (validDrill(d)) { d.kind = plan[i][0]; d.type = plan[i][1] === "mixed" ? "Mixed set" : typeName(plan[i][0], plan[i][1]); saveToBank(d); made++; }
+        }
+        ui.prep = 0; toast(made + " drills saved. They work without internet."); render();
+      } catch (e) { ui.prep = 0; if (made) toast(made + " drills saved before it stopped."); aiFail(e); }
+    },
+    genDrill: function () { var p = ui.practice; return runDrill(p.kind, p.kind === "reading" ? p.rtype : p.ltype); },
+    genWeakest: function () { var p = ui.practice, id = weakestType(p.kind); if (p.kind === "reading") p.rtype = id; else p.ltype = id; return runDrill(p.kind, id); },
+    openSample: function (el) {
+      var s = D4.SAMPLES.filter(function (x) { return x.id === el.getAttribute("data-id"); })[0]; if (!s) return;
+      loadDrill(s, null); ui.practice.sampleId = s.id;
     },
     checkDrill: function () {
-      var p = ui.practice, d = p.data, qs = d.questions || [];
+      var p = ui.practice, d = p.data;
       p.checked = true; tPause("practice"); stopSay(); p.playing = false;
-      var sc = 0;
-      qs.forEach(function (q, i) {
-        if (answerOk(q, p.answers[i])) sc++;
-        else put("m_" + uid(), { skill: p.kind === "reading" ? "Reading" : "Listening", wrong: q.q + " → I answered: " + (p.answers[i] || "(blank)"), right: String(q.answer), note: q.explanation || d.type, date: today(), source: d.type.split(":")[0] });
+      var total = 0, sc = 0;
+      groupsOf(d).forEach(function (g, gi) {
+        var gs = 0, qs = g.questions || [];
+        qs.forEach(function (q, i) {
+          var a = p.answers[gi + "-" + i];
+          if (answerOk(q, a, g)) gs++;
+          else put("m_" + uid(), { skill: p.kind === "reading" ? "Reading" : "Listening", wrong: (q.q || "") + " → I answered: " + (Array.isArray(a) ? a.join(", ") : (a || "(blank)")), right: ansLabel(q), note: q.explanation || groupTypeName(d, g), date: today(), source: groupTypeName(d, g) });
+        });
+        if (qs.length) addDrill({ date: today(), kind: p.kind, type: groupTypeName(d, g), score: gs, total: qs.length });
+        sc += gs; total += qs.length;
       });
-      addDrill({ date: today(), kind: p.kind, type: d.type, score: sc, total: qs.length });
       if (p.bankId) markBank(p.bankId, sc);
+      if (p.sampleId) { var ss = Object.assign({}, get("samplescores") || {}); ss[p.sampleId] = sc + "/" + total; put("samplescores", ss); }
       autoTick(["test"]);
       render();
     },
@@ -1395,10 +1759,7 @@
     },
     openDrill: function (el) {
       var id = el.getAttribute("data-id"), b = drillBank().filter(function (x) { return x.id === id; })[0]; if (!b) return;
-      var p = ui.practice; stopSay();
-      p.data = b.data; p.kind = b.data.kind; p.bankId = id; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false;
-      tSet("practice", 0, "up"); if (p.kind === "reading") tStart("practice");
-      render(); window.scrollTo(0, 0);
+      loadDrill(b.data, id);
     },
     stopL: function () { ui.practice.playing = false; stopSay(); render(); },
 
@@ -1428,8 +1789,17 @@
     mShow: function () { ui.progress.mquiz.show = true; render(); },
     mNext: function () { var q = ui.progress.mquiz; q.i++; q.show = false; render(); },
     mQuizEnd: function () { ui.progress.mquiz = null; render(); },
-    copyBackup: function () {
+    snoozeBackup: function () { try { localStorage.setItem("ielts-last-backup", String(Date.now() - 7 * 864e5)); } catch (e) {} render(); },
+    downloadBackup: function () {
       var text = JSON.stringify({ app: "ielts-tracker", v: 2, at: new Date().toISOString(), docs: S.docs });
+      try {
+        var a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        a.download = "ielts-backup-" + today() + ".json"; document.body.appendChild(a); a.click(); a.remove();
+        markBackup(); toast("Backup file saved to Downloads.");
+      } catch (e) { ui.progress.backupText = text; render(); }
+    },
+    copyBackup: function () {
+      var text = JSON.stringify({ app: "ielts-tracker", v: 2, at: new Date().toISOString(), docs: S.docs }); markBackup();
       try {
         navigator.clipboard.writeText(text).then(function () { toast("Backup copied. Paste it into a note or email to yourself."); }, function () { ui.progress.backupText = text; render(); });
       } catch (e) { ui.progress.backupText = text; render(); }
@@ -1499,44 +1869,75 @@
     s.cards[id] = schedule(prev, q);
     s.log[today()] = (s.log[today()] || 0) + 1;
     saveSrs(s);
-    sess.done++; if (q === 0) { sess.again++; sess.queue.push(id); }
+    sess.done++; if (q === 0) sess.again++;
+    if (s.cards[id].due - Date.now() < 30 * 60000) sess.queue.push(id);
     sess.i++; sess.revealed = false; sess.bn = false; sess.check = null; sess.use = "";
     if (s.log[today()] === 20) autoTick(["vocab", "vocabRead"]);
     render();
     if (autoPlay && sess.i < sess.queue.length) { var nx = cardById(sess.queue[sess.i]); if (nx) say(nx.w); }
   }
-  function startSpell() {
-    var s = srs(), seen = allCards().filter(function (c) { return s.cards[c.id] && c.w.indexOf(" ") === -1; });
-    var pool = seen.length >= 10 ? seen : deckCards(ui.cards.deck).filter(function (c) { return c.w.indexOf(" ") === -1; });
-    if (pool.length < 4) pool = allCards().filter(function (c) { return c.w.indexOf(" ") === -1; });
+  function startSession(ids) {
+    if (!ids.length) { toast("No words to study."); return; }
+    ui.cards.mode = "review"; ui.cards.session = { queue: ids.slice(), i: 0, done: 0, again: 0, revealed: false, bn: false, use: "", check: null };
+    render(); window.scrollTo(0, 0);
+    if (autoPlay) { var x = cardById(ids[0]); if (x) say(x.w); }
+  }
+  function defaultPool(min) {
+    var s = srs(), deck = deckCards(ui.cards.deck), seen = deck.filter(function (c) { return s.cards[c.id]; });
+    return seen.length >= min ? seen : (deck.length >= min ? deck : allCards());
+  }
+  function startSpell(pool) {
+    pool = (pool || defaultPool(10)).filter(function (c) { return c.w.indexOf(" ") === -1 && /^[a-z-]+$/i.test(c.w); });
+    if (pool.length < 3) pool = allCards().filter(function (c) { return c.w.indexOf(" ") === -1; });
     ui.cards.mode = "spell"; ui.cards.spell = { items: shuffle(pool).slice(0, 10).map(function (c) { return c.id; }), i: 0, input: "", result: null, score: 0, wrong: [] };
     render(); window.scrollTo(0, 0);
     var x = cardById(ui.cards.spell.items[0]); if (x) say(x.w);
     var inp = $("spellInput"); if (inp) inp.focus();
   }
-  function startQuiz() {
-    var cards = allCards(), s = srs(), deck = deckCards(ui.cards.deck);
-    var seen = deck.filter(function (c) { return s.cards[c.id]; });
-    var pool = shuffle(seen.length >= 10 ? seen : (deck.length >= 10 ? deck : cards)).slice(0, 10);
+  function startQuiz(pool) {
+    var cards = allCards(); pool = shuffle(pool && pool.length ? pool : defaultPool(10)).slice(0, 10);
     ui.cards.mode = "quiz";
     ui.cards.quiz = {
       i: 0, score: 0, picked: null, items: pool.map(function (c) {
-        var same = cards.filter(function (o) { return o.id !== c.id && o.topic === c.topic; });
+        var same = cards.filter(function (o) { return o.id !== c.id && o.topic === c.topic && posGroup(o.pos) === posGroup(c.pos); });
+        if (same.length < 3) same = cards.filter(function (o) { return o.id !== c.id && o.topic === c.topic; });
         var others = shuffle(same.length >= 3 ? same : cards.filter(function (o) { return o.id !== c.id; })).slice(0, 3);
         return { id: c.id, opts: shuffle([c.id].concat(others.map(function (o) { return o.id; }))) };
       })
     };
     render(); window.scrollTo(0, 0);
   }
-  function startMatch() {
-    var s = srs(), deck = deckCards(ui.cards.deck);
-    var seen = deck.filter(function (c) { return s.cards[c.id]; });
-    var pool = seen.length >= 6 ? seen : (deck.length >= 6 ? deck : allCards());
+  function startMatch(pool) {
+    pool = pool && pool.length >= 3 ? pool : defaultPool(6);
     var items = shuffle(pool).slice(0, 6).map(function (c) { return c.id; });
     ui.cards.mode = "match";
     ui.cards.match = { items: items, left: shuffle(items), right: shuffle(items), pick: null, done: [], wrong: null, mistakes: 0 };
     tSet("match", 0, "up"); tStart("match");
     render(); window.scrollTo(0, 0);
+  }
+  function startCloze(pool) {
+    pool = shuffle(pool && pool.length ? pool : defaultPool(10));
+    var items = [];
+    for (var i = 0; i < pool.length && items.length < 10; i++) {
+      var c = pool[i], sents = shuffle(c.exs);
+      for (var j = 0; j < sents.length; j++) {
+        var f = findInSentence(sents[j], c.w);
+        if (f) { items.push({ id: c.id, s: sents[j], index: f.index, ans: f.text }); break; }
+      }
+    }
+    if (!items.length) { toast("No sentences found for these words."); return; }
+    ui.cards.mode = "cloze"; ui.cards.cloze = { items: items, i: 0, input: "", result: null, score: 0, wrong: [], hint: false };
+    render(); window.scrollTo(0, 0);
+    var inp = $("clozeInput"); if (inp) inp.focus();
+  }
+  function clozeCheck() {
+    var cz = ui.cards.cloze; if (!cz || cz.result) return;
+    var it = cz.items[cz.i], ok = norm(cz.input) === norm(it.ans);
+    cz.result = ok ? "right" : "wrong";
+    var s = srs();
+    if (ok) cz.score++;
+    else { cz.wrong.push(it.ans); if (s.cards[it.id]) { s.cards[it.id].due = Math.min(s.cards[it.id].due, Date.now()); saveSrs(s); } }
+    render();
   }
   function spellCheck() {
     var sp = ui.cards.spell; if (!sp || sp.result) return;
@@ -1549,6 +1950,7 @@
 
   // ================= events =================
   view.addEventListener("click", function (e) {
+    askPersist();
     var el = e.target.closest("[data-act]");
     if (!el || !view.contains(el) || el.disabled) return;
     var fn = ACT[el.getAttribute("data-act")];
@@ -1563,10 +1965,16 @@
       writeDay(ui.sel, r); render();
     } else if (k === "deck") { ui.cards.deck = v; ui.cards.showAll = false; render(); }
     else if (k === "add_topic") ui.cards.add.topic = v;
-    else if (k === "rtype") { ui.practice.rtype = v; }
-    else if (k === "ltype") { ui.practice.ltype = v; }
+    else if (k === "add_lvl") ui.cards.add.lvl = v;
+    else if (k.indexOf("b_") === 0) { ui.cards.b[k.slice(2)] = v; ui.cards.showAll = false; render(); }
+    else if (k === "rtype") { ui.practice.rtype = v; render(); }
+    else if (k === "t1kind") { ui.write.t1kind = v; ui.write.p1 = 0; ui.write.custom = null; render(); }
+    else if (k === "t2type") { ui.write.t2type = v; ui.write.pi = 0; ui.write.custom = null; render(); }
+    else if (k === "lsec") { ui.practice.lsec = v; }
+    else if (k === "ansm") { var cur = ui.practice.answers[el.getAttribute("data-q")]; cur = Array.isArray(cur) ? cur.slice() : []; var ix = cur.indexOf(v); if (el.checked && ix === -1) cur.push(v); if (!el.checked && ix !== -1) cur.splice(ix, 1); ui.practice.answers[el.getAttribute("data-q")] = cur; }
+    else if (k === "ltype") { ui.practice.ltype = v; render(); }
     else if (k === "exam") ui.practice.exam = el.checked;
-    else if (k === "ans") { ui.practice.answers[+el.getAttribute("data-q")] = v; }
+    else if (k === "ans") { ui.practice.answers[el.getAttribute("data-q")] = v; }
     else if (k === "mf_skill") ui.progress.mform.skill = v;
     else if (k === "mfilter") { ui.progress.mfilter = v; render(); }
     else if (k === "ai_provider") { ui.progress.ai = ui.progress.ai || {}; ui.progress.ai.provider = v; render(); }
@@ -1586,8 +1994,9 @@
     else if (k.indexOf("add_") === 0) { var was = !!(ui.cards.add.w || ui.cards.add.def); ui.cards.add[k.slice(4)] = v; if (k === "add_w" && !was && v) { render(); var ai2 = view.querySelector('[data-in="add_w"]'); if (ai2) { ai2.focus(); ai2.setSelectionRange(v.length, v.length); } } }
     else if (k === "useIt") ui.cards.session.use = v;
     else if (k === "spell") ui.cards.spell.input = v;
+    else if (k === "cloze") ui.cards.cloze.input = v;
     else if (k === "ptopic") ui.practice.topic = v;
-    else if (k === "ans") ui.practice.answers[+el.getAttribute("data-q")] = v;
+    else if (k === "ans") ui.practice.answers[el.getAttribute("data-q")] = v;
     else if (k.indexOf("mf_") === 0) {
       var f = ui.progress.form, fk = k.slice(3); f[fk] = v;
       if (fk === "Lraw") { var lb = rawToBand(v, D.LISTENING_BANDS); if (lb !== null && v !== "") { f.L = lb; var li = view.querySelector('[data-in="mf_L"]'); if (li) li.value = lb; } }
@@ -1600,6 +2009,7 @@
   });
   view.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && e.target.getAttribute("data-in") === "spell") { e.preventDefault(); spellCheck(); }
+    if (e.key === "Enter" && e.target.getAttribute("data-in") === "cloze") { e.preventDefault(); if (ui.cards.cloze.result) ACT.clozeNext(); else clozeCheck(); }
     if (e.key === "Enter" && e.target.getAttribute("data-in") === "useIt") { e.preventDefault(); ACT.checkUse(); }
   });
   document.addEventListener("keydown", function (e) {

@@ -303,7 +303,7 @@ table.data th { font-size: 12.5px; color: var(--muted); }
 .flipwrap { position: relative; perspective: 1400px; touch-action: pan-y; animation: cardIn .28s ease; user-select: none; -webkit-user-select: none; }
 @keyframes cardIn { from { opacity: 0; transform: translateY(14px) scale(.97); } to { opacity: 1; transform: none; } }
 .flipcard {
-  position: relative; min-height: 330px; transform-style: preserve-3d;
+  position: relative; min-height: 410px; transform-style: preserve-3d;
   transition: transform .5s cubic-bezier(.2,.75,.25,1); cursor: pointer; border-radius: 20px; outline: none;
 }
 .flipcard.flipped { transform: rotateY(180deg); }
@@ -359,3 +359,64 @@ table.data th { font-size: 12.5px; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   .flipcard { transition: none; } .flipwrap, .verdict { animation: none; } .mt.wrong { animation: none; }
 }
+
+/* v3: levels, filters, 3 examples, gap-fill */
+.filterlabel { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 6px 2px -4px; }
+.cefr { font-size: 11px; font-weight: 700; border-radius: 6px; padding: 1px 6px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); white-space: nowrap; font-variant-numeric: tabular-nums; }
+summary .cefr { margin-left: auto; }
+summary .cefr + .lvl { margin-left: 6px; }
+.exlist { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.exlist li { font-size: 15px; line-height: 1.45; color: var(--muted); }
+.exlist li::marker { color: var(--accent); font-weight: 700; font-size: 13px; }
+.exlist li > span { margin-right: 6px; }
+.exlist li .iconbtn, .exlist li .speak { vertical-align: middle; transform: scale(.85); }
+.exlist mark { background: var(--accent-soft); color: var(--ink); border-radius: 4px; padding: 0 2px; font-weight: 600; }
+.face.back .exlist li { font-size: 14px; }
+.clozes { font-size: 19px; line-height: 1.6; font-family: var(--font-display); }
+.clozes .gap { display: inline-block; font-family: ui-monospace, Menlo, monospace; letter-spacing: .12em; color: var(--accent); border-bottom: 2px solid var(--accent); padding: 0 4px; font-size: 17px; }
+.notice { border-color: var(--warn); background: var(--warn-soft); }
+.notice .note { color: var(--ink); }
+
+/* v3: question types */
+.tipbox { display: grid; gap: 4px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); font-size: 14px; }
+.tipbox span { color: var(--ink); line-height: 1.45; }
+.note.block { display: block; font-size: 12px; margin-top: 2px; }
+.qgroup { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); }
+.qgroup:first-of-type { border-top: 0; padding-top: 0; }
+.qghead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wordbox { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border: 1px dashed var(--line); border-radius: 12px; }
+.wordbox span { font-size: 13px; background: var(--surface-2); border-radius: 8px; padding: 3px 8px; }
+.wordbox.list { display: grid; gap: 4px; }
+.wordbox.list span { background: transparent; padding: 0; font-size: 14px; }
+.outline { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); line-height: 1.9; }
+.outline p { margin: 0; }
+.outline .frow { display: grid; grid-template-columns: minmax(90px, 40%) 1fr; gap: 8px; align-items: center; border-bottom: 1px dotted var(--line); padding-bottom: 6px; }
+.outline .fbox { border: 1.5px solid var(--partial); border-radius: 10px; padding: 8px 10px; text-align: center; background: var(--surface-2); }
+.outline .arrow { text-align: center; color: var(--muted); line-height: 1; }
+.outline td, .outline th { vertical-align: middle; }
+.gapin { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.gapin > b { font-size: 11px; background: var(--ink); color: var(--surface); border-radius: 6px; padding: 0 5px; line-height: 18px; }
+.gapin input.inl { width: 120px; min-width: 0; padding: 4px 8px !important; font-size: 15px; display: inline-block; }
+.gapin select.inl { width: auto; min-width: 54px; padding: 4px 6px; font-size: 15px; }
+.gapin.ok input, .gapin.ok select { border-color: var(--good); background: var(--accent-soft); }
+.gapin.bad input, .gapin.bad select { border-color: var(--bad); background: var(--bad-soft); }
+.expl.r b { color: var(--good); } .expl.w b { color: var(--bad); }
+.mapgrid { display: grid; gap: 6px; padding: 8px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.mapgrid > div { min-height: 54px; border-radius: 8px; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 12px; padding: 4px; }
+.mapgrid .mland { background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+.mapgrid .mletter { background: var(--accent-soft); color: var(--accent); font-weight: 800; font-size: 18px; border: 1.5px dashed var(--accent); }
+.maps { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.maps figure, .pies figure { margin: 0; display: grid; gap: 4px; }
+.maps figcaption, .pies figcaption { text-align: center; font-weight: 700; font-size: 13px; }
+.pies { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.t1chart { display: grid; gap: 8px; }
+.t1chart svg { width: 100%; height: auto; }
+.clegend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12px; color: var(--muted); }
+.clegend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+.frames { display: grid; gap: 8px; }
+.frame { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid var(--line); }
+.frame .iconbtn { justify-self: start; }
+.outline .trow { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.outline .trh { font-weight: 700; }
+.outline .trow .frow:last-child { border-bottom: 0; padding-bottom: 0; }
+.gapin { white-space: normal; flex-wrap: nowrap; }
