@@ -1,6 +1,6 @@
 # IELTS Prep Tracker
 
-An installable study app for IELTS Academic that works offline: a daily routine checklist, 620 flashcards with spaced repetition, a match game, spelling and meaning drills, a timed Writing editor, Speaking timers, mock-test band tracking and a mistake log.
+An installable study app for IELTS Academic that works offline: a daily routine checklist, 1,620 flashcards with spaced repetition, a match game, spelling and meaning drills, a timed Writing editor, Speaking timers, mock-test band tracking and a mistake log.
 
 **Open it:** https://mrbaten.github.io/ielts-prep/
 
