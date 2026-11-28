@@ -518,3 +518,22 @@ summary .cefr + .lvl { margin-left: 6px; }
 .strip { grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .day { min-height: 28px; aspect-ratio: auto; }
 .notice.card { display: grid; gap: 10px; }
+
+/* v7: audit round 3 */
+.face { touch-action: pan-y; }
+.flipcard.flipped { min-height: 0; }
+.flipcard.flipped .face.back { position: relative; inset: auto; min-height: 410px; overflow: visible; }
+.tasks li { display: flex; align-items: center; gap: 6px; }
+.tasks li .task { flex: 1; min-width: 0; }
+.iconbtn.go { font-size: 22px; font-weight: 700; color: var(--accent); }
+.bigin.right { border-color: var(--good); background: var(--accent-soft); }
+.bigin.wrong { border-color: var(--bad); background: var(--bad-soft); }
+.choice.right { border-color: var(--good); background: var(--accent-soft); }
+.choice.right span::before { content: "✓ "; color: var(--good); font-weight: 800; }
+.choice.wrong, .choice.wrong:has(input:checked) { border-color: var(--bad); background: var(--bad-soft); }
+.choice.wrong span::before { content: "✗ "; color: var(--bad); font-weight: 800; }
+.choice:has(input:disabled):not(.right):not(.wrong) { opacity: .6; }
+.t1chart svg { max-width: 560px; margin: 0 auto; display: block; }
+@media (min-width: 1000px) { .pies figure svg { max-width: 220px; margin: 0 auto; } }
+.updatebar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 30; background: var(--ink); color: var(--bg); border-radius: 12px; padding: 8px 8px 8px 14px; display: flex; gap: 10px; align-items: center; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+@media (min-width: 1000px) { .updatebar { bottom: 24px; } }

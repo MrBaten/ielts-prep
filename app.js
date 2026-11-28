@@ -62,9 +62,17 @@
     } catch (e) { /* storage unavailable */ }
   }
   var lsTimer;
+  var storageFull = false;
   function saveLocal() {
     clearTimeout(lsTimer);
-    lsTimer = setTimeout(function () { try { localStorage.setItem(LS, JSON.stringify({ docs: S.docs })); } catch (e) {} }, 300);
+    lsTimer = setTimeout(function () {
+      try { localStorage.setItem(LS, JSON.stringify({ docs: S.docs })); storageFull = false; }
+      catch (e) {
+        storageFull = true;
+        try { setSync("⚠ Not saved: phone storage for this app is full"); } catch (x) {}
+        toast("Storage is full, so your latest progress was NOT saved. Go to Progress → Save backup file, then delete old mistakes or essays.");
+      }
+    }, 300);
   }
   function get(id) { return S.docs[id]; }
   function put(id, body) {
@@ -238,6 +246,7 @@
   var STATUSES = [["all", "Any status"], ["new", "Not started"], ["learning", "Learning now"], ["learnt", "Learnt"], ["mastered", "Mastered (21+ days)"], ["practised", "Practised (any)"], ["difficult", "Difficult (forgotten 2+ times)"], ["due", "Due now"]];
   var POS = [["all", "All word types"], ["noun", "Nouns"], ["verb", "Verbs"], ["adj", "Adjectives"], ["adv", "Adverbs"], ["phrase", "Phrases & linkers"]];
   function posGroup(p) { p = String(p || ""); if (p.indexOf("noun") === 0) return "noun"; if (p.indexOf("verb") === 0) return "verb"; if (p.indexOf("adj") === 0) return "adj"; if (p.indexOf("adv") === 0) return "adv"; return "phrase"; }
+  function isDifficult(st) { return !!st && (st.lapses || 0) >= 2 && (st.streak || 0) < 3; }
   function level(st) {
     if (!st) return "new";
     if (!st.reps) return "learning";
@@ -250,7 +259,7 @@
       case "learnt": return !!st && level(st) === "review";
       case "mastered": return !!st && level(st) === "mastered";
       case "practised": return !!st;
-      case "difficult": return !!st && (st.lapses || 0) >= 2;
+      case "difficult": return !!st && isDifficult(st);
       case "due": return !!st && st.due <= now;
       default: return true;
     }
@@ -288,6 +297,7 @@
       else { ivl = Math.max(st.ivl + 2, Math.round(st.ivl * st.ease * 1.3)); st.ease = st.ease + 0.15; }
       st.ivl = Math.min(ivl, 365); st.reps = (st.reps || 0) + 1; st.due = startOfToday() + st.ivl * 864e5;
     }
+    st.streak = q >= 2 ? (st.streak || 0) + 1 : 0;
     st.last = now;
     return st;
   }
@@ -370,7 +380,7 @@
   }
   function loadDrill(d, bankId) {
     var p = ui.practice; stopSay();
-    p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false; p.blankOk = false; p.blankWarn = 0; p.heard = false;
+    p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playsBy = {}; p.audioFail = false; p.playing = false; p.script = false; p.blankOk = false; p.blankWarn = 0; p.heard = false;
     p.part = 0;
     if (p.kind === "reading") { tSet("practice", d.parts ? 3600 : 1200, "down"); tStart("practice"); } else tSet("practice", 0, "up");
     render();
@@ -542,7 +552,12 @@
   function hasLocalVoice() {
     try { return speechSynthesis.getVoices().some(function (v) { return /^en/i.test(v.lang) && v.localService; }); } catch (e) { return false; }
   }
-  function canSay() { return !ttsOff && (TTS || ("speechSynthesis" in window)); }
+  var voiceOK = null;
+  function checkVoices() {
+    try { var v = speechSynthesis.getVoices(); if (v.length) voiceOK = v.some(function (x) { return /^en/i.test(x.lang); }); } catch (e) { voiceOK = false; }
+  }
+  if ("speechSynthesis" in window) { checkVoices(); try { speechSynthesis.addEventListener("voiceschanged", function () { var before = voiceOK; checkVoices(); if (before !== voiceOK) render(); }); } catch (e) {} setTimeout(function () { if (voiceOK === null) { voiceOK = false; render(); } }, 2500); }
+  function canSay() { return !ttsOff && (!!TTS || (("speechSynthesis" in window) && voiceOK !== false)); }
   function sayFallback(text, rate, pitch) {
     return new Promise(function (res, rej) {
       if (!("speechSynthesis" in window)) return rej({ code: "unavailable" });
@@ -603,6 +618,12 @@
   }
   setInterval(function () {
     paintTimers();
+    var tw = T.write;
+    if (tw && tw.mode === "down" && tw.running) {
+      var lw = tLeft("write");
+      if (lw <= 300 && lw > 0 && !tw.warned) { tw.warned = true; toast("Writing: 5 minutes left. Check your conclusion."); }
+      if (lw <= 0 && !tw.ended) { tw.ended = true; toast("Writing: time is up."); try { navigator.vibrate && navigator.vibrate(200); } catch (e) {} }
+    }
     var tp = T.practice;
     if (tp && tp.mode === "down" && tp.running) {
       var lf = tLeft("practice");
@@ -612,7 +633,12 @@
     // speaking part 2 flow: prep -> talk -> done
     if (ui.speak.phase === "prep" && tLeft("speak") <= 0) {
       ui.speak.phase = "talk"; tSet("speak", 120, "down"); tStart("speak");
-      toast("Start speaking now: 2 minutes."); if (ui.tab === "speak") render();
+      toast("Start speaking now: 2 minutes."); try { navigator.vibrate && navigator.vibrate([120, 60, 120]); } catch (e) {}
+      if (ui.tab === "speak") {
+        var ae = document.activeElement, isNotes = ae && ae.getAttribute && ae.getAttribute("data-in") === "notes", pos = isNotes ? ae.selectionStart : 0;
+        render(); if (isNotes) { var nn = view.querySelector('[data-in="notes"]'); if (nn) { nn.focus(); try { nn.setSelectionRange(pos, pos); } catch (e) {} } }
+        if (ui.speak.autoRec !== false && canRecord() && REC.state !== "recording") ACT.recStart();
+      }
     } else if (ui.speak.phase === "talk" && ui.speak.part === 2 && tLeft("speak") <= 0) {
       tPause("speak"); ui.speak.phase = "done"; ui.speak.secs = 120;
       toast("Time's up. In the real test the examiner stops you here."); if (ui.tab === "speak") render();
@@ -631,11 +657,17 @@
     practice: { kind: "reading", rtype: "tfng", ltype: "lform", lsec: "Section 1: an everyday conversation", topic: "", data: null, answers: {}, checked: false, exam: true, plays: 0, playing: false, script: false },
     progress: { form: { date: today(), L: "", R: "", W: "", S: "", Lraw: "", Rraw: "" }, mfilter: "all", mform: { skill: "Writing", wrong: "", right: "", note: "" }, mquiz: null, restore: false, restoreText: "", backupText: "" }
   };
-  try { var dr = JSON.parse(localStorage.getItem("ielts-drafts") || "null"); if (dr) { ui.write.text = dr.write || ""; ui.speak.text = dr.speak || ""; } } catch (e) {}
+  try {
+    var dr = JSON.parse(localStorage.getItem("ielts-drafts") || "null");
+    if (dr) {
+      ui.write.text = dr.write || ""; ui.speak.text = dr.speak || "";
+      if (dr.wprompt && ui.write.text) { ui.write.task = dr.wprompt.task || 2; ui.write.custom = dr.wprompt; ui.write.dirty = true; }
+    }
+  } catch (e) {}
   var draftTimer;
   function saveDrafts() {
     clearTimeout(draftTimer);
-    draftTimer = setTimeout(function () { try { localStorage.setItem("ielts-drafts", JSON.stringify({ write: ui.write.text, speak: ui.speak.text })); } catch (e) {} }, 400);
+    draftTimer = setTimeout(function () { try { localStorage.setItem("ielts-drafts", JSON.stringify({ write: ui.write.text, speak: ui.speak.text, wprompt: ui.write.text ? currentWritePrompt() : null })); } catch (e) {} }, 400);
   }
   tSet("write", 40 * 60, "down");
   tSet("speak", 60, "down");
@@ -672,6 +704,16 @@
     var fn = { today: viewToday, cards: viewCards, write: viewWrite, speak: viewSpeak, practice: viewPractice, progress: viewProgress }[ui.tab];
     view.innerHTML = fn();
     paintTimers();
+    fixAudioDur();
+  }
+  // Chrome reports Infinity for MediaRecorder webm duration; seek to the end once so the player shows length and can seek
+  function fixAudioDur() {
+    var as = view.querySelectorAll("audio[data-fixdur]");
+    for (var i = 0; i < as.length; i++) (function (a) {
+      a.addEventListener("loadedmetadata", function () {
+        if (a.duration === Infinity) { a.currentTime = 1e101; a.addEventListener("timeupdate", function f() { a.removeEventListener("timeupdate", f); a.currentTime = 0; }); }
+      });
+    })(as[i]);
   }
   function softRender() {
     var a = document.activeElement;
@@ -684,6 +726,7 @@
   }
 
   // ---------------- TODAY ----------------
+  var GO = { vocab: "cards", vocabRead: "cards", test: "practice", speak: "speak", essay: "write", weak: "progress", mock: "progress" };
   function viewToday() {
     var t = today(), k = ui.sel, r = dayRec(k), list = tasksFor(k, r.type), s = scoreOf(k);
     var due = dueCount(), weak = weakest(), st = settings();
@@ -698,7 +741,10 @@
     var essayAvg = graded.length ? (graded.reduce(function (a, e) { return a + Number(e.result.overall); }, 0) / graded.length) : null;
 
     var h = backupDue() ? '<section class="card notice"><b>Back up your progress</b><p class="note">It has been over 2 weeks. A backup file keeps your words safe if the phone is reset.</p><div class="row"><button class="btn small" data-act="downloadBackup">Save backup file</button><button class="btn ghost small" data-act="snoozeBackup">Later</button></div></section>' : "";
-    h += '<section class="card"><div class="row between"><h2>Focus today</h2><span class="note">' + esc(pretty(t)) + '</span></div><div class="tiles">';
+    var ready = Math.min(due + newLeft(), sessSize());
+    h += '<section class="card"><div class="row between"><h2>Focus today</h2><span class="note">' + esc(pretty(t)) + '</span></div>';
+    h += ready ? '<button class="btn big wide" data-act="todayReview">Next: review ' + ready + ' cards · ~' + estMin(ready) + ' min</button>' : '<button class="btn big wide" data-act="go" data-tab="' + (weak ? weak.tab : "practice") + '">Next: ' + (weak ? "practise " + esc(weak.name) : "a Reading or Listening exercise") + '</button>';
+    h += '<div class="tiles">';
     h += '<button class="tile' + (due > 30 ? " alert" : "") + '" data-act="go" data-tab="cards"><b>' + due + '</b><span>flashcards due' + (newLeft() ? " · " + newLeft() + " new" : "") + ' · ~' + estMin(Math.min(due + newLeft(), sessSize())) + ' min a session' + (ui.cards.level !== "all" ? " · " + { basic: "Basic", inter: "Intermediate", adv: "Advanced" }[ui.cards.level] : "") + '</span></button>';
     if (weak) {
       var gap = st.target - weak.band;
@@ -720,7 +766,7 @@
     h += '<span class="floor ' + (s.floor ? "met" : "not") + '">' + (s.full ? "All done. Good work." : (s.floor ? "30-minute floor met" : "30-minute floor not met yet")) + '</span><ul class="tasks">';
     list.forEach(function (it) {
       var on = r.done.indexOf(it.id) !== -1;
-      h += '<li><label class="task' + (on ? " done" : "") + '" for="cb-' + it.id + '"><input type="checkbox" id="cb-' + it.id + '" data-ch="tick" data-id="' + it.id + '"' + (on ? " checked" : "") + '><span class="t">' + esc(it.t) + '</span><span class="m">' + fmtMin(it.m) + '</span></label></li>';
+      h += '<li><label class="task' + (on ? " done" : "") + '" for="cb-' + it.id + '"><input type="checkbox" id="cb-' + it.id + '" data-ch="tick" data-id="' + it.id + '"' + (on ? " checked" : "") + '><span class="t">' + esc(it.t) + '</span><span class="m">' + fmtMin(it.m) + '</span></label>' + (GO[it.id] ? '<button class="iconbtn sm go" data-act="go" data-tab="' + (it.id === "weak" ? (weakest() ? weakest().tab : "progress") : GO[it.id]) + '" aria-label="Open ' + esc(it.t) + '">›</button>' : "") + '</li>';
     });
     h += '</ul><p class="note">Some items tick themselves: finishing your review cards (or 20 reviews), a marked essay, a saved speaking session, a finished drill or a logged mock test.</p></section>';
 
@@ -767,7 +813,7 @@
     restoreCardFilter();
     var s = srs(), cards = deckCards(c.deck), now = Date.now();
     var counts = { due: 0, learning: 0, review: 0, mastered: 0, "new": 0, difficult: 0 };
-    cards.forEach(function (x) { var st = s.cards[x.id]; counts[level(st)]++; if (st && st.due <= now) counts.due++; if (st && (st.lapses || 0) >= 2) counts.difficult++; });
+    cards.forEach(function (x) { var st = s.cards[x.id]; counts[level(st)]++; if (st && st.due <= now) counts.due++; if (st && isDifficult(st)) counts.difficult++; });
     var q = buildQueue(c.deck).length, total = Math.max(1, cards.length);
     var fresh = Math.min(newLeft(), counts["new"]), n = Math.min(q, sessSize());
     // filters first: what am I studying?
@@ -809,7 +855,7 @@
   function viewBrowse() {
     var c = ui.cards, b = c.b, s = srs(), a = c.add;
     var shown = filterCards(browseFilter());
-    var h = '<section class="card"><div class="row between"><button class="textbtn" data-act="cardsHome">← Flashcards</button><span class="note">' + allCards().length + ' words in total</span></div><h2>Find words</h2>';
+    var h = '<section class="card"><div class="row between"><button class="textbtn" data-act="cardsHome">← Flashcards</button><span class="note">' + allCards().length + ' words in total</span></div><h2>Find words</h2><button class="btn ghost" data-act="toggleAdd">' + (c.addOpen ? "Close the add-word form" : "+ Add your own word") + '</button>';
     h += '<input type="text" placeholder="Search English, meaning or বাংলা" data-in="cardSearch" value="' + esc(c.search) + '" aria-label="Search words">';
     h += '<div class="grid2">';
     h += '<label class="field">Status<select data-ch="b_status">' + STATUSES.map(function (o) { return '<option value="' + o[0] + '"' + (b.status === o[0] ? " selected" : "") + '>' + esc(o[1]) + '</option>'; }).join("") + '</select></label>';
@@ -822,26 +868,30 @@
     }
     h += '</section>';
 
+    var listStart = h.length;
     var limit = c.showN || 40;
     h += '<section class="card"><div class="wordlist" id="wordlist">';
     shown.slice(0, limit).forEach(function (x) {
       var st = s.cards[x.id], lv = level(st);
-      h += '<details data-card="' + esc(x.id) + '"><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="cefr">' + esc(x.lvl) + '</span><span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></summary><div class="body"></div></details>';
+      var isOpen = c.openId === x.id;
+      h += '<details data-card="' + esc(x.id) + '"' + (isOpen ? " open" : "") + '><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="cefr">' + esc(x.lvl) + '</span><span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></summary><div class="body">' + (isOpen ? rowBody(x.id) : "") + '</div></details>';
     });
     if (!shown.length) h += '<p class="empty">No words match these filters.</p>';
     h += '</div>' + (shown.length > limit ? '<button class="btn ghost wide" data-act="showMoreCards">Show ' + Math.min(50, shown.length - limit) + ' more (' + (shown.length - limit) + ' left)</button>' : "") + '</section>';
 
-    h += '<section class="card"><h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
+    var addH = '';
+    addH += '<section class="card" id="addWord"><h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
     if (aiReady()) h += '<button class="btn ghost" data-act="addFill"' + (ui.busy ? " disabled" : "") + '>Fill with AI</button>';
-    h += '</div>' + busyBlock("addFill");
+    addH += '</div>' + busyBlock("addFill");
     if (a.w || a.def) {
-      h += '<div class="grid2"><label class="field">Part of speech<input type="text" data-in="add_pos" value="' + esc(a.pos) + '"></label><label class="field">Level<select data-ch="add_lvl">' + ["A2", "B1", "B2", "C1", "C2"].map(function (l) { return '<option' + ((a.lvl || "B2") === l ? " selected" : "") + '>' + l + '</option>'; }).join("") + '</select></label></div>';
-      h += '<label class="field">Deck<select data-ch="add_topic">' + Object.keys(D.TOPICS).map(function (k) { return '<option value="' + k + '"' + (a.topic === k ? " selected" : "") + '>' + esc(D.TOPICS[k]) + '</option>'; }).join("") + '</select></label>';
-      h += '<label class="field">Meaning (English)<input type="text" data-in="add_def" value="' + esc(a.def) + '"></label>';
-      h += '<label class="field">Example sentence 1<input type="text" data-in="add_ex" value="' + esc(a.ex) + '"></label><label class="field">Example sentence 2<input type="text" data-in="add_ex2" value="' + esc(a.ex2 || "") + '"></label><label class="field">Example sentence 3<input type="text" data-in="add_ex3" value="' + esc(a.ex3 || "") + '"></label>';
-      h += '<label class="field">Bangla meaning (optional)<input type="text" data-in="add_bn" value="' + esc(a.bn) + '"></label><button class="btn" data-act="addSave">Save card</button>';
+      addH += '<div class="grid2"><label class="field">Part of speech<select data-ch="add_pos">' + ["", "noun", "verb", "adj", "adv", "phrase", "phrasal verb", "collocation", "idiom"].map(function (o) { return '<option value="' + o + '"' + ((a.pos || "") === o ? " selected" : "") + '>' + (o || "Choose…") + '</option>'; }).join("") + '</select></label><label class="field">Level<select data-ch="add_lvl">' + ["A2", "B1", "B2", "C1", "C2"].map(function (l) { return '<option' + ((a.lvl || "B2") === l ? " selected" : "") + '>' + l + '</option>'; }).join("") + '</select></label></div>';
+      addH += '<label class="field">Deck<select data-ch="add_topic">' + Object.keys(D.TOPICS).map(function (k) { return '<option value="' + k + '"' + (a.topic === k ? " selected" : "") + '>' + esc(D.TOPICS[k]) + '</option>'; }).join("") + '</select></label>';
+      addH += '<label class="field">Meaning (English)<input type="text" data-in="add_def" value="' + esc(a.def) + '"></label>';
+      addH += '<label class="field">Example sentence 1<input type="text" data-in="add_ex" value="' + esc(a.ex) + '"></label><label class="field">Example sentence 2<input type="text" data-in="add_ex2" value="' + esc(a.ex2 || "") + '"></label><label class="field">Example sentence 3<input type="text" data-in="add_ex3" value="' + esc(a.ex3 || "") + '"></label>';
+      addH += '<label class="field">Bangla meaning (optional)<input type="text" data-in="add_bn" value="' + esc(a.bn) + '"></label><button class="btn" data-act="addSave">Save card</button>';
     }
-    return h + aiNote() + '</section>';
+    addH += aiNote() + '</section>';
+    return c.addOpen ? h.slice(0, listStart) + addH + h.slice(listStart) : h;
   }
   function reviewControls() {
     var sess = ui.cards.session, s = srs(), st = s.cards[sess.queue[sess.i]];
@@ -875,7 +925,7 @@
     h += '<div class="face front"><div class="row between full"><span class="chip quiet">' + esc(D.TOPICS[x.topic] || "") + '</span><span><span class="cefr">' + esc(x.lvl) + '</span> <span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></span></div><div class="word">' + esc(x.w) + '</div><div class="pos">' + esc(x.pos || "") + ' · ' + esc(lvlName(x.lvl)) + '</div>' + speakBtn(x.w) + '<div class="hint">Do you know it? Say the meaning, then tap.</div></div>';
     h += '<div class="face back"><div class="row"><div class="word sm grow">' + esc(x.w) + '</div>' + speakBtn(x.w) + '</div><div class="def">' + esc(x.def) + '</div>';
     if (x.bn) h += sess.bn ? '<div class="bn" lang="bn">' + esc(x.bn) + '</div>' : '<button class="textbtn" lang="bn" data-act="showBn">বাংলা অর্থ দেখুন</button>';
-    h += '<div class="row between"><span class="note">Examples</span>' + sentToggle() + '</div>' + sentList(x, true, sess.more ? 0 : 3);
+    h += '<div class="note">Examples</div>' + sentList(x, true, sess.more ? 0 : 3);
     if (!sess.more && sentsFor(x).length > 3) h += '<button class="textbtn" data-act="moreEx">+' + (sentsFor(x).length - 3) + ' more examples</button>';
     h += '</div></div></div><div id="sessControls" class="controls">' + reviewControls() + '</div></section>';
     return h;
@@ -910,9 +960,10 @@
     h += '<div class="flash"><p class="note">Fill the gap with the right word (the first letter is given).</p><div class="clozes">' + esc(it.s.slice(0, it.index)) + '<span class="gap">' + esc(blank) + '</span>' + esc(it.s.slice(it.index + it.ans.length)) + '</div>';
     h += '<p class="note">Meaning: ' + esc(x.def) + (cz.hint ? ' · ' + esc(x.pos) + ', ' + it.ans.length + ' letters' : "") + '</p></div>';
     if (!cz.result) {
-      h += '<input type="text" class="bigin" id="clozeInput" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="cloze" value="' + esc(cz.input) + '" placeholder="Type the missing word" aria-label="Missing word"><div class="grid2"><button class="btn big" data-act="clozeCheck">Check</button><button class="btn ghost" data-act="clozeHint">Hint</button></div>';
+      h += '<input type="text" class="bigin" id="clozeInput" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="cloze" value="' + esc(cz.input) + '" placeholder="Type the missing word" aria-label="Missing word"><div class="grid2"><button class="btn big" data-act="clozeCheck">Check</button><button class="btn ghost" data-act="clozeHint">' + (cz.hint ? "Show answer" : "Hint") + '</button></div>';
     } else {
-      h += '<div class="verdict ' + cz.result + '"><b>' + (cz.result === "right" ? "Correct!" : "Not quite") + '</b><span>' + (cz.result === "right" ? "" : "You wrote: " + esc(cz.input || "(nothing)") + " · ") + 'Answer: <b>' + esc(it.ans) + '</b></span></div><div class="row">' + speakBtn(it.s) + '<span class="note grow">' + esc(it.s) + '</span></div><button class="btn big wide" data-act="clozeNext">Next</button>';
+      h += '<input type="text" class="bigin ' + cz.result + '" id="clozeInput" data-in="cloze" readonly value="' + esc(cz.input || "") + '" aria-label="Your answer (press Enter for next)">';
+      h += '<div class="verdict ' + cz.result + '"><b>' + (cz.result === "right" ? "Correct!" : (cz.input ? "Not quite" : "Answer shown")) + '</b><span>Answer: <b>' + esc(it.ans) + '</b></span></div><div class="row">' + speakBtn(it.s) + '<span class="note grow">' + esc(it.s) + '</span></div><button class="btn big wide" data-act="clozeNext">Next</button>';
     }
     return h + '</section>';
   }
@@ -933,10 +984,10 @@
     var h = '<section class="card session">' + sessHead("cardsHome", sp.i, sp.items.length, '<span class="chip">' + sp.score + ' ✓</span>');
     h += '<div class="flash center">';
     if (canSay()) h += '<button class="bigplay" data-act="spellSay" aria-label="Play the word">' + ICON.sound + '</button><button class="textbtn" data-act="spellSaySlow">Play slowly</button><p class="note">Clue: ' + esc(x.def) + '</p>';
-    else h += '<p class="note">Audio isn’t available here, so use the meaning as your clue.</p><div class="def">' + esc(x.def) + '</div>';
+    else h += '<p class="note">No English voice on this device, so use the meaning (and the hint) as your clue.</p><p class="note">Hint: ' + esc(x.w.charAt(0)) + ' · ' + x.w.length + ' letters' + esc(x.def) + '</div>';
     h += '</div>';
     if (!sp.result) h += '<input type="text" class="bigin" id="spellInput" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="spell" value="' + esc(sp.input) + '" placeholder="Type what you hear" aria-label="Your spelling"><button class="btn big wide" data-act="spellCheck">Check</button>';
-    else h += '<div class="verdict ' + sp.result + '"><b>' + (sp.result === "right" ? "Correct!" : "Not quite") + '</b><span>' + (sp.result === "right" ? "" : "You wrote: " + esc(sp.input || "(nothing)") + " · ") + 'Answer: <b>' + esc(x.w) + '</b></span></div><button class="btn big wide" data-act="spellNext">Next</button>';
+    else h += '<input type="text" class="bigin ' + sp.result + '" id="spellInput" data-in="spell" readonly value="' + esc(sp.input || "") + '" aria-label="Your spelling (press Enter for next)"><div class="verdict ' + sp.result + '"><b>' + (sp.result === "right" ? "Correct!" : "Not quite") + '</b><span>' + (sp.result === "right" ? "" : "You wrote: " + esc(sp.input || "(nothing)") + " · ") + 'Answer: <b>' + esc(x.w) + '</b></span></div><button class="btn big wide" data-act="spellNext">Next</button>';
     return h + '</section>';
   }
   function viewQuiz() {
@@ -953,12 +1004,12 @@
       h += '<button class="' + cls + '" data-act="quizPick" data-n="' + n + '"' + (qz.picked != null ? " disabled" : "") + '>' + esc(o.w) + '</button>';
     });
     h += '</div>';
-    if (qz.picked != null) h += '<p class="note">' + esc(x.ex || "") + '</p><button class="btn big wide" data-act="quizNext">Next</button>';
+    if (qz.picked != null) { var qok = it.opts[qz.picked] === it.id; h += '<div class="verdict ' + (qok ? "right" : "wrong") + '"><b>' + (qok ? "Correct!" : "Not quite") + '</b><span>' + (qok ? "" : "Answer: <b>" + esc(x.w) + "</b>") + '</span></div><p class="note">' + esc(x.ex || "") + '</p><button class="btn big wide" data-act="quizNext">Next</button>'; }
     return h + '</section>';
   }
   function viewMatch() {
     var m = ui.cards.match;
-    var h = '<section class="card session"><div class="sesshead"><button class="iconbtn" data-act="cardsHome" aria-label="Close">✕</button><span class="grow note">' + m.done.length + ' of ' + m.items.length + ' pairs · ' + plural(m.mistakes, "mistake") + '</span><span data-timer="match" class="timer small">0:00</span></div>';
+    var h = '<section class="card session"><div class="sesshead"><button class="iconbtn" data-act="cardsHome" aria-label="Close">✕</button><span class="grow note">' + m.done.length + ' of ' + m.items.length + ' pairs · ' + plural(m.mistakes, "mistake") + '</span><span role="timer" data-timer="match" class="timer small">0:00</span></div>';
     if (m.done.length === m.items.length) {
       var secs = Math.round(m.secs), best = m.best;
       h += '<div class="center"><div class="hero-num">' + fmtClock(secs) + '</div><h2>' + (m.newBest ? "New best time!" : "All matched") + '</h2><p class="note">' + plural(m.mistakes, "mistake") + ' · best ' + (best ? fmtClock(best) : "–") + '</p></div><div class="grid2"><button class="btn" data-act="mode" data-m="match">Play again</button><button class="btn ghost" data-act="cardsHome">Done</button></div>';
@@ -1016,7 +1067,7 @@
     var hi = niceMax(Math.max.apply(null, vals)), lo = 0;
     var x = function (i) { return L + i * (W - L - R) / Math.max(1, xs.length - 1); }, y = function (v) { return T + (hi - v) / (hi - lo) * (H - T - B); };
     var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Line graph">';
-    for (var g = 0; g <= 4; g++) { var gv = lo + (hi - lo) * g / 4; s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + (Math.round(gv * 10) / 10) + '</text>'; }
+    var stp = niceStep(hi * 0.98); for (var gv = lo; gv <= hi + 1e-9; gv += stp) { s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + (Math.round(gv * 100) / 100) + '</text>'; }
     xs.forEach(function (t, i) { s += '<text x="' + x(i) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="9" fill="var(--muted)">' + esc(t) + '</text>'; });
     c.rows.forEach(function (r, ri) { var col = PAL[ri % PAL.length]; s += '<polyline fill="none" stroke="' + col + '" stroke-width="2" points="' + r.slice(1).map(function (v, i) { return x(i) + "," + y(+v); }).join(" ") + '"/>' + r.slice(1).map(function (v, i) { return '<circle cx="' + x(i) + '" cy="' + y(+v) + '" r="2.5" fill="' + col + '"/>'; }).join(""); });
     return s + '</svg>' + legend(c.rows.map(function (r) { return r[0]; }));
@@ -1027,11 +1078,14 @@
     var hi = niceMax(Math.max.apply(null, vals)), gw = (W - L - R) / groups.length, bw = Math.min(22, (gw - 8) / series.length);
     var y = function (v) { return T + (hi - v) / hi * (H - T - B); };
     var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Bar chart">';
-    for (var g = 0; g <= 4; g++) { var gv = hi * g / 4; s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + Math.round(gv) + '</text>'; }
+    var stp2 = niceStep(hi * 0.98); for (var gv = 0; gv <= hi + 1e-9; gv += stp2) { s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(gv) + '" y2="' + y(gv) + '" stroke="var(--line)"/><text x="' + (L - 4) + '" y="' + (y(gv) + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + (Math.round(gv * 100) / 100) + '</text>'; }
     groups.forEach(function (r, gi) {
       var gx = L + gi * gw + (gw - bw * series.length) / 2;
       r.slice(1).forEach(function (v, si) { s += '<rect x="' + (gx + si * bw) + '" y="' + y(+v) + '" width="' + (bw - 2) + '" height="' + (y(0) - y(+v)) + '" rx="2" fill="' + PAL[si % PAL.length] + '"/>'; });
-      s += '<text x="' + (L + gi * gw + gw / 2) + '" y="' + (H - 18) + '" text-anchor="middle" font-size="9" fill="var(--muted)">' + esc(String(r[0]).slice(0, 14)) + '</text>';
+      var words = String(r[0]).split(" "), l1 = "", l2 = "";
+      words.forEach(function (wd) { if ((l1 + " " + wd).trim().length <= Math.max(8, Math.floor(gw / 5.2)) && !l2) l1 = (l1 + " " + wd).trim(); else l2 = (l2 + " " + wd).trim(); });
+      if (l2.length > Math.max(8, Math.floor(gw / 5.2))) l2 = l2.slice(0, Math.max(7, Math.floor(gw / 5.2) - 1)) + "…";
+      s += '<text x="' + (L + gi * gw + gw / 2) + '" y="' + (H - 21) + '" text-anchor="middle" font-size="8.5" fill="var(--muted)">' + esc(l1) + (l2 ? '<tspan x="' + (L + gi * gw + gw / 2) + '" dy="10">' + esc(l2) + '</tspan>' : "") + '</text>';
     });
     return s + '</svg>' + (series.length > 1 ? legend(series) : "");
   }
@@ -1050,7 +1104,9 @@
     });
     return h + '</div>' + legend(c.rows.map(function (r) { return r[0]; }));
   }
-  function niceMax(v) { var m = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1e-9)))), steps = [1, 2, 2.5, 5, 10]; for (var i = 0; i < steps.length; i++) { var s = steps[i] * m / 4 * 4; if (s >= v * 1.05) return s; } return 10 * m; }
+  function niceStep(v) { var raw = v / 4, m = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-9)))), st = [1, 2, 2.5, 5, 10]; for (var i = 0; i < st.length; i++) if (st[i] * m >= raw) return st[i] * m; return 10 * m; }
+  function niceMax(v) { var s = niceStep(v * 1.02); return Math.ceil(v * 1.02 / s) * s; }
+  function niceMaxOld(v) { var m = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1e-9)))), steps = [1, 2, 2.5, 5, 10]; for (var i = 0; i < steps.length; i++) { var s = steps[i] * m / 4 * 4; if (s >= v * 1.05) return s; } return 10 * m; }
   function legend(names) { return '<div class="clegend">' + names.map(function (n, i) { return '<span><i style="background:' + PAL[i % PAL.length] + '"></i>' + esc(n) + '</span>'; }).join("") + '</div>'; }
   function tableHtml(p) {
     var cs = promptCharts(p); if (!cs.length) return "";
@@ -1105,7 +1161,7 @@
     if (w.view) {
       var e = get(w.view);
       if (!e) { w.view = null; return viewWrite(); }
-      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Task ' + e.task + ' · ' + e.words + ' words</span></div><div class="prompt">' + esc(e.prompt) + '</div><div class="model">' + esc(e.text) + '</div>' + (e.result ? resultHtml(e.result, "essayView") : '<p class="note">Saved without AI marking.</p>') + '<button class="btn danger" data-act="delEssay" data-id="' + esc(w.view) + '">Delete essay</button>' + confirmBlock("essay:" + w.view, "Delete this essay?") + '</section>';
+      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Task ' + e.task + ' · ' + e.words + ' words</span></div><div class="prompt">' + esc(e.prompt) + '</div>' + (e.charts ? tableHtml(e) : "") + (e.minutes ? '<p class="note">Written in ' + e.minutes + ' min</p>' : "") + '<div class="model">' + esc(e.text) + '</div>' + (e.result ? resultHtml(e.result, "essayView") : '<p class="note">Saved without AI marking.</p>') + '<button class="btn danger" data-act="delEssay" data-id="' + esc(w.view) + '">Delete essay</button>' + confirmBlock("essay:" + w.view, "Delete this essay?") + '</section>';
     }
     var p = currentWritePrompt();
     var h = '<section class="card"><div class="row between"><h2>Writing</h2><div class="seg" style="min-width:180px"><button data-act="wTask" data-n="1" aria-pressed="' + (w.task === 1) + '">Task 1<span>20 min</span></button><button data-act="wTask" data-n="2" aria-pressed="' + (w.task === 2) + '">Task 2<span>40 min</span></button></div></div>';
@@ -1115,7 +1171,7 @@
     if (w.plan) h += '<ol class="plan">' + planFor(p).map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") + '</ol>';
     h += '</section>';
 
-    h += '<section class="card"><div class="row between wtimerbar"><span data-timer="write" class="timer">40:00</span><div class="row"><button class="btn ghost small" data-act="wTimer" data-op="start">Start</button><button class="btn ghost small" data-act="wTimer" data-op="pause">Pause</button><button class="btn ghost small" data-act="wTimer" data-op="reset">Reset</button></div></div>';
+    h += '<section class="card"><div class="row between wtimerbar"><span role="timer" data-timer="write" class="timer">40:00</span><div class="row"><button class="btn ghost small" data-act="wTimer" data-op="start">Start</button><button class="btn ghost small" data-act="wTimer" data-op="pause">Pause</button><button class="btn ghost small" data-act="wTimer" data-op="reset">Reset</button></div></div>';
     h += '<textarea class="essay" id="essayBox" data-in="essay" placeholder="Write your answer here. Plan for 3–5 minutes first." aria-label="Your answer">' + esc(w.text) + '</textarea>';
     h += '<div class="stats" id="essayStats">' + statsHtml(w.text, w.task) + '</div>';
     if (aiReady()) h += '<button class="btn wide" data-act="grade"' + (ui.busy ? " disabled" : "") + '>Mark my answer (AI band estimate)</button>';
@@ -1148,7 +1204,7 @@
       var e = get(sp.view);
       if (!e) { sp.view = null; return viewSpeak(); }
       if (sp.recFor !== sp.view) { sp.recFor = sp.view; sp.recUrl = null; var vid = sp.view; idb(function (st) { var g = st.get(vid); g.onsuccess = function () { if (g.result && g.result.blob && ui.speak.view === vid) { sp.recUrl = URL.createObjectURL(g.result.blob); render(); } }; }); }
-      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeSpeakView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Part ' + e.part + '</span></div><div class="prompt">' + esc(e.prompt) + '</div>' + (sp.recUrl ? '<audio controls src="' + sp.recUrl + '" style="width:100%"></audio>' : "") + (e.text ? '<div class="model">' + esc(e.text) + '</div>' : "") + (e.result ? resultHtml(e.result, "speakView") : "") + '<button class="btn danger" data-act="delSpeak" data-id="' + esc(sp.view) + '">Delete session</button>' + confirmBlock("speak:" + sp.view, "Delete this session?") + '</section>';
+      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeSpeakView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Part ' + e.part + '</span></div><div class="prompt">' + esc(e.prompt) + '</div>' + (sp.recUrl ? '<audio controls preload="metadata" data-fixdur src="' + sp.recUrl + '" style="width:100%"></audio>' : "") + (e.text ? '<div class="model">' + esc(e.text) + '</div>' : "") + (e.result ? resultHtml(e.result, "speakView") : "") + '<button class="btn danger" data-act="delSpeak" data-id="' + esc(sp.view) + '">Delete session</button>' + confirmBlock("speak:" + sp.view, "Delete this session?") + '</section>';
     }
     var h = '<section class="card"><div class="row between"><h2>Speaking</h2></div><div class="seg">';
     [1, 2, 3].forEach(function (n) { h += '<button data-act="sPart" data-n="' + n + '" aria-pressed="' + (sp.part === n) + '">Part ' + n + '<span>' + ["", "4–5 min", "3–4 min", "4–5 min"][n] + '</span></button>'; });
@@ -1169,14 +1225,14 @@
     h += '<section class="card">';
     if (sp.part === 2) {
       var lab = { idle: "Ready", prep: "Preparation: make notes", talk: "Speak now", done: "Finished" }[sp.phase];
-      h += '<div class="row between"><div><div class="note">' + lab + '</div><span data-timer="speak" class="timer">1:00</span></div><div class="row">';
-      if (sp.phase === "idle" || sp.phase === "done") h += '<button class="btn" data-act="startPrep">' + (sp.phase === "done" ? "Try again" : "Start 1-minute prep") + '</button>';
+      h += '<div class="row between"><div><div class="note">' + lab + '</div><span role="timer" data-timer="speak" class="timer">1:00</span></div><div class="row">';
+      if (sp.phase === "idle" || sp.phase === "done") h += '<button class="btn' + (sp.phase === "done" ? " ghost" : "") + '" data-act="startPrep">' + (sp.phase === "done" ? "Try again" : "Start 1-minute prep") + '</button>';
       if (sp.phase === "prep") h += '<button class="btn ghost" data-act="skipPrep">Start speaking now</button>';
       if (sp.phase === "talk") h += '<button class="btn ghost" data-act="endTalk">I’ve finished</button>';
-      h += '</div></div>';
+      h += '</div></div>' + confirmBlock("retryTalk", "Start again? Your unsaved answer will be cleared.");
       if (sp.phase === "prep" || sp.notes) h += '<textarea rows="3" data-in="notes" placeholder="Notes: key words only" aria-label="Preparation notes">' + esc(sp.notes) + '</textarea>';
     } else {
-      h += '<div class="row between"><span data-timer="speak" class="timer">0:00</span><div class="row"><button class="btn ghost small" data-act="sTimer" data-op="start">Start</button><button class="btn ghost small" data-act="sTimer" data-op="pause">Stop</button><button class="btn ghost small" data-act="sTimer" data-op="reset">Reset</button></div></div>';
+      h += '<div class="row between"><span role="timer" data-timer="speak" class="timer">0:00</span><div class="row"><button class="btn ghost small" data-act="sTimer" data-op="start">Start</button><button class="btn ghost small" data-act="sTimer" data-op="pause">Stop</button><button class="btn ghost small" data-act="sTimer" data-op="reset">Reset</button></div></div>';
     }
     h += recorderHtml();
     h += '<div class="row between"><b>Your answer</b>' + (DICT ? '<button class="btn ' + (dictState !== "idle" ? "mic on" : "ghost") + ' small" data-act="mic">' + ICON.mic + (dictState !== "idle" ? " Stop dictation" : " Speak to type") + '</button>' : "") + '</div>';
@@ -1200,19 +1256,21 @@
   function canRecord() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
   function recorderHtml() {
     var h = '<div class="recbox"><div class="row between"><b>Record yourself</b>';
+    var autoRow = ui.speak.part === 2 ? '<label class="choice"><input type="checkbox" data-ch="autoRec"' + (ui.speak.autoRec !== false ? " checked" : "") + '><span>Record my 2-minute talk automatically</span></label>' : "";
     if (!canRecord()) return h + '</div><p class="note">Recording isn’t supported in this browser. Use the offline app in Chrome or Safari.</p></div>';
     if (REC.state === "recording") h += '<button class="btn danger small" data-act="recStop">■ Stop · <span id="recSecs">' + fmtClock(REC.secs) + '</span></button>';
-    else h += '<button class="btn small" data-act="recStart">● ' + (REC.url ? "Record again" : "Start recording") + '</button>';
-    h += '</div>';
+    else h += '<button class="btn ' + (REC.url ? "ghost " : "") + 'small" data-act="' + (REC.url ? "recAgain" : "recStart") + '">● ' + (REC.url ? "Record again" : "Start recording") + '</button>';
+    h += '</div>' + autoRow + confirmBlock("recAgain", "Replace your last recording?") + confirmBlock("recDel", "Delete this recording?");
     if (REC.state === "recording") h += '<p class="note"><span class="recdot"></span>Recording… answer the question out loud.</p>';
     if (REC.err) h += '<p class="note">' + esc(REC.err) + '</p>';
     if (REC.url && REC.state !== "recording") {
-      h += '<audio controls src="' + REC.url + '"></audio><div class="row"><span class="note grow">' + fmtClock(REC.secs) + ' recorded' + (ui.speak.part === 2 ? (REC.secs < 90 ? " · aim for 1½–2 minutes" : " · good length") : "") + '</span><a class="btn ghost small" download="speaking-' + today() + '.webm" href="' + REC.url + '">Download</a><button class="btn ghost small" data-act="recDel">Delete</button></div>';
-      h += '<details class="selfcheck"><summary class="textbtn">Listen back: self-check (band descriptors)</summary>' + ["Did I answer the question directly in the first sentence?", "Did I keep talking without long pauses or restarting sentences?", "Did I give reasons and an example, not just a short answer?", "Did I use a few less common words or phrases correctly?", "Did I mix tenses and sentence types (because, although, if)?", "Were my word stress and sounds clear enough to follow easily?"].map(function (q) { return '<label class="choice"><input type="checkbox"><span>' + q + '</span></label>'; }).join("") + '</details>';
+      h += '<audio controls preload="metadata" data-fixdur src="' + REC.url + '"></audio><div class="row"><span class="note grow">' + fmtClock(REC.secs) + ' recorded' + (ui.speak.part === 2 ? (REC.secs < 90 ? " · aim for 1½–2 minutes" : " · good length") : "") + '</span><a class="btn ghost small" download="speaking-' + today() + '.webm" href="' + REC.url + '">Download</a><button class="btn ghost small" data-act="recDelAsk">Delete</button></div>';
+      h += '<details class="selfcheck"' + (ui.speak.check && ui.speak.check.some(Boolean) ? " open" : "") + '><summary class="textbtn">Listen back: self-check (band descriptors)</summary>' + ["Did I answer the question directly in the first sentence?", "Did I keep talking without long pauses or restarting sentences?", "Did I give reasons and an example, not just a short answer?", "Did I use a few less common words or phrases correctly?", "Did I mix tenses and sentence types (because, although, if)?", "Were my word stress and sounds clear enough to follow easily?"].map(function (q, qi) { return '<label class="choice"><input type="checkbox" data-ch="selfcheck" data-i="' + qi + '"' + ((ui.speak.check || [])[qi] ? " checked" : "") + '><span>' + q + '</span></label>'; }).join("") + '</details>';
     }
     return h + '</div>';
   }
   function recTick() { var el = $("recSecs"); REC.secs = Math.round((Date.now() - REC.t0) / 1000); if (el) el.textContent = fmtClock(REC.secs); if (ui.speak.part === 2 && REC.secs >= 120) recStop(); }
+  function resetRec() { recStop(); if (REC.url) try { URL.revokeObjectURL(REC.url); } catch (e) {} REC.url = null; REC.blob = null; REC.secs = 0; REC.state = "idle"; }
   function recStop() { try { if (REC.rec && REC.rec.state !== "inactive") REC.rec.stop(); } catch (e) {} clearInterval(REC.timer); }
   function idb(fn) {
     try {
@@ -1242,7 +1300,7 @@
     var files = ["data6.js", "data7.js"], left = files.length;
     files.forEach(function (f) {
       var sc = document.createElement("script"); sc.src = f; sc.async = true;
-      sc.onload = sc.onerror = function () { if (--left === 0) { lazyState = "done"; T1ALL = null; if (ui.tab === "practice" || ui.tab === "write") render(); } };
+      sc.onload = sc.onerror = function () { if (--left === 0) { lazyState = "done"; T1ALL = null; if (ui.tab === "practice" || (ui.tab === "write" && ui.write.task === 1)) softRender(); } };
       document.body.appendChild(sc);
     });
   }
@@ -1281,6 +1339,10 @@
     h += '<div class="tipbox"><b>' + esc(tt ? tt.name : "Mixed set") + '</b><span>' + esc(tt ? tt.tip : "Like the real test: one passage or recording with several question types. Read each instruction and word limit carefully.") + '</span></div>';
     if (lazyState !== "done") h += '<p class="note">Loading exercises…</p>';
     var bankEx = (window.IELTS_EXBANK || []).filter(function (x) { return x.kind === p.kind && (cur === "mixed" || x.qtype === cur); });
+    if (cur === "mixed") {
+      var smp = D4.SAMPLES.filter(function (s) { return s.kind === p.kind; }), scs0 = get("samplescores") || {};
+      h += '<div class="exgrid">' + smp.map(function (s, i) { var sc = scs0[s.id]; return '<button class="exbtn' + (sc ? " done" : "") + '" data-act="openSample" data-id="' + s.id + '"><b>Mixed set ' + (i + 1) + '</b><span>' + esc(s.title) + '</span><span class="row">' + (sc ? '<span class="chip">best ' + esc(sc) + '</span>' : '<span class="chip quiet">' + groupsOf(s).length + ' types</span>') + '</span></button>'; }).join("") + '</div>';
+    }
     if (cur !== "mixed" && bankEx.length) {
       var scs = get("samplescores") || {};
       h += '<div class="exgrid">' + bankEx.map(function (x, i) { var sc = scs[x.id]; var diff = ["easier", "medium", "harder", "hardest"][Math.min(3, Math.round(i * 3 / Math.max(1, bankEx.length - 1)))]; return '<button class="exbtn' + (sc ? " done" : "") + '" data-act="openEx" data-id="' + esc(x.id) + '"><b>Exercise ' + (i + 1) + '</b><span>' + esc(x.title) + '</span><span class="row"><span class="chip quiet">' + diff + '</span>' + (sc ? '<span class="chip">best ' + esc(sc) + '</span>' : "") + '</span></button>'; }).join("") + '</div><p class="note">' + bankEx.length + ' built-in exercises for this type, easiest first. They all work offline.</p>';
@@ -1335,21 +1397,31 @@
     var squash = function (x) { return String(x).replace(/[\s-]/g, ""); };
     return /\d/.test(na) && acc.some(function (x) { return squash(x) === squash(na); });
   }
-  function ansLabel(q) { return Array.isArray(q.answer) ? q.answer.join(" and ") : String(q.answer); }
-  function inputFor(g, q, key, inline) {
-    var p = ui.practice, val = p.answers[key], dis = p.checked ? " disabled" : "";
+  function marksOfGroup(g) { return (g.questions || []).reduce(function (a, q) { return a + (Array.isArray(q.answer) ? q.answer.length : 1); }, 0); }
+  function ansLabel(q, g) {
+    var opts = (q.options && q.options.length ? q.options : (g && g.options) || []);
+    var full = function (a) { var o = opts.filter(function (x) { return sameChoice(x, a); })[0]; return o && o.length > String(a).length + 1 && !/^(TRUE|FALSE|NOT GIVEN|YES|NO)$/.test(o) ? o : String(a); };
+    return Array.isArray(q.answer) ? q.answer.map(full).join(" and ") : full(q.answer);
+  }
+  function inputFor(g, q, key, inline, num) {
+    var p = ui.practice, val = p.answers[key], dis = p.checked ? " disabled" : "", lab = num ? (inline ? "Gap " : "Question ") + num : "Answer";
     var opts = q.options && q.options.length ? q.options : (g.options || []);
+    var cls = function (o, chosen) {
+      if (!p.checked) return "choice";
+      var right = Array.isArray(q.answer) ? q.answer.some(function (a) { return sameChoice(o, a); }) : sameChoice(o, q.answer);
+      return "choice" + (right ? " right" : (chosen ? " wrong" : ""));
+    };
     if (Array.isArray(q.answer)) {
-      var arr = Array.isArray(val) ? val : [];
-      return '<p class="note">Choose ' + q.answer.length + '.</p>' + opts.map(function (o) { return '<label class="choice"><input type="checkbox" data-ch="ansm" data-q="' + key + '" value="' + esc(o) + '"' + (arr.indexOf(o) !== -1 ? " checked" : "") + dis + '><span>' + esc(o) + '</span></label>'; }).join("");
+      var arr = Array.isArray(val) ? val : [], full = arr.length >= q.answer.length;
+      return '<p class="note">Choose ' + q.answer.length + (arr.length ? " · " + arr.length + " chosen" : "") + '.</p>' + opts.map(function (o) { var ch = arr.indexOf(o) !== -1; return '<label class="' + cls(o, ch) + '"><input type="checkbox" data-ch="ansm" data-q="' + key + '" value="' + esc(o) + '"' + (ch ? " checked" : "") + (dis || (full && !ch ? " disabled" : "")) + '><span>' + esc(o) + '</span></label>'; }).join("");
     }
     if (q.options && q.options.length) {
-      return q.options.map(function (o) { return '<label class="choice"><input type="radio" name="q' + key + '" data-ch="ans" data-q="' + key + '" value="' + esc(o) + '"' + (val === o ? " checked" : "") + dis + '><span>' + esc(o) + '</span></label>'; }).join("");
+      return '<div role="radiogroup" aria-label="' + lab + '">' + q.options.map(function (o) { return '<label class="' + cls(o, val === o) + '"><input type="radio" name="q' + key + '" data-ch="ans" data-q="' + key + '" value="' + esc(o) + '"' + (val === o ? " checked" : "") + dis + '><span>' + esc(o) + '</span></label>'; }).join("") + '</div>';
     }
     if (opts.length) {
-      return '<select class="' + (inline ? "inl" : "") + '" data-ch="ans" data-q="' + key + '"' + dis + ' aria-label="Answer"><option value="">' + (inline ? "–" : "Choose…") + '</option>' + opts.map(function (o) { return '<option value="' + esc(o) + '"' + (val === o ? " selected" : "") + '>' + esc(inline ? choiceKey(o).toUpperCase() : o) + '</option>'; }).join("") + '</select>';
+      return '<select class="' + (inline ? "inl" : "") + '" data-ch="ans" data-q="' + key + '"' + dis + ' aria-label="' + lab + '"><option value="">' + (inline ? "–" : "Choose…") + '</option>' + opts.map(function (o) { return '<option value="' + esc(o) + '"' + (val === o ? " selected" : "") + '>' + esc(inline ? choiceKey(o).toUpperCase() + " " + String(o).replace(/^\s*([A-Za-z]|[ivx]+)[\s.)]+/, "").slice(0, 18) : o) + '</option>'; }).join("") + '</select>';
     }
-    return '<input type="text" class="' + (inline ? "inl" : "") + '" data-in="ans" data-q="' + key + '" value="' + esc(val || "") + '"' + dis + ' placeholder="' + (inline ? "" : "Your answer") + '" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Answer">';
+    return '<input type="text" class="' + (inline ? "inl" : "") + '" data-in="ans" data-q="' + key + '" value="' + esc(val || "") + '"' + dis + ' placeholder="' + (inline ? "" : "Your answer") + '" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="' + lab + '">';
   }
   function outlineHtml(g, gi, base) {
     var o = g.outline, st = o.style || "notes", p = ui.practice;
@@ -1358,7 +1430,7 @@
         var i = +n - 1, q = (g.questions || [])[i]; if (!q) return m;
         var key = gi + "-" + i, mark = "";
         if (p.checked) mark = answerOk(q, p.answers[key], g) ? ' ok' : ' bad';
-        return '<span class="gapin' + mark + '"><b>' + (base + i + 1) + '</b>' + inputFor(g, q, key, true) + '</span>';
+        return '<span class="gapin' + mark + '"><b>' + (base + i + 1) + '</b>' + inputFor(g, q, key, true, base + i + 1) + '</span>';
       });
     };
     var h = '<div class="outline ' + st + '">' + (o.title ? '<b>' + esc(o.title) + '</b>' : "");
@@ -1386,22 +1458,24 @@
   function groupsHtml(d) {
     var p = ui.practice, h = "", base = 0;
     groupsOf(d).forEach(function (g, gi) {
-      var qs = g.questions || [], from = base + 1, to = base + qs.length;
+      var qs = g.questions || [], from = base + 1, to = base + marksOfGroup(g);
       if (d.parts && g._part !== (p.part || 0)) { base = to; return; }
       h += '<div class="qgroup"><div class="qghead"><b>Questions ' + from + (to > from ? "–" + to : "") + '</b><span class="chip quiet">' + esc(groupTypeName(d, g)) + '</span></div>' + (g.instructions ? '<p class="note">' + esc(g.instructions) + '</p>' : "");
       if (g.map) h += mapHtml(g.map);
       if (g.outline) {
         if (g.options && g.options.length && !g.map) h += '<div class="wordbox">' + g.options.map(function (o) { return '<span>' + esc(o) + '</span>'; }).join("") + '</div>';
         h += outlineHtml(g, gi, base);
-        if (p.checked) h += qs.map(function (q, i) { var ok = answerOk(q, p.answers[gi + "-" + i], g); return '<div class="expl ' + (ok ? "r" : "w") + '"><b>' + (base + i + 1) + '. ' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q))) + '.</b> ' + esc(q.explanation || "") + '</div>'; }).join("");
+        if (p.checked) h += qs.map(function (q, i) { var ok = answerOk(q, p.answers[gi + "-" + i], g); return '<div class="expl ' + (ok ? "r" : "w") + '"><b>' + (base + i + 1) + '. ' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q, g))) + '.</b> ' + esc(q.explanation || "") + '</div>'; }).join("");
       } else {
         if (g.options && g.options.length && !g.map && !qs.some(function (q) { return q.options; })) h += '<div class="wordbox list">' + g.options.map(function (o) { return '<span>' + esc(o) + '</span>'; }).join("") + '</div>';
+        var n0 = base;
         qs.forEach(function (q, i) {
-          var key = gi + "-" + i, cls = "q", ok = null;
+          var key = gi + "-" + i, cls = "q", ok = null, w = Array.isArray(q.answer) ? q.answer.length : 1, num = (n0 + 1) + (w > 1 ? "–" + (n0 + w) : "");
           if (p.checked) { ok = answerOk(q, p.answers[key], g); cls += ok ? " right" : " wrong"; }
-          h += '<div class="' + cls + '"><div class="qt">' + (base + i + 1) + '. ' + esc(q.q) + '</div>' + inputFor(g, q, key, false);
-          if (p.checked) h += '<div class="expl"><b>' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q))) + '.</b> ' + esc(q.explanation || "") + '</div>';
+          h += '<div class="' + cls + '" id="q' + key + '"><div class="qt">' + num + '. ' + esc(q.q) + '</div>' + inputFor(g, q, key, false, num);
+          if (p.checked) h += '<div class="expl"><b>' + (ok ? "Correct" : "Answer: " + esc(ansLabel(q, g))) + '.</b> ' + esc(q.explanation || "") + '</div>';
           h += '</div>';
+          n0 += w;
         });
       }
       h += '</div>';
@@ -1411,29 +1485,36 @@
   }
   function readingHtml() {
     var p = ui.practice, d = p.data;
-    var h = '<div class="drill"><div class="jumpbar"><button class="btn small ghost" data-act="jumpQ" data-to="rPassage">Passage</button><button class="btn small ghost" data-act="jumpQ" data-to="rQuestions">Questions</button><span data-timer="practice" data-cls="small jt" class="timer small jt">' + (d.parts ? "60:00" : "20:00") + '</span><button class="btn small ghost" data-act="closeDrill" aria-label="Close exercise">✕</button></div>';
+    var h = '<div class="drill"><div class="jumpbar"><button class="btn small ghost" data-act="jumpQ" data-to="rPassage">Passage</button><button class="btn small ghost" data-act="jumpQ" data-to="rQuestions">Questions</button><span role="timer" data-timer="practice" data-cls="small jt" class="timer small jt">' + (d.parts ? "60:00" : "20:00") + '</span><button class="btn small ghost" data-act="closeDrill" aria-label="Close exercise">✕</button></div>';
     var cp = d.parts ? d.parts[p.part || 0] : d;
-    h += '<div class="readgrid"><section class="card" id="rPassage"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">' + (d.parts ? "60:00" : "20:00") + '</span></div>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3><p class="note">The real test gives 60 minutes for all three passages; the timer counts down.</p>' : '<p class="note">You have about 20 minutes per passage in the real test; the timer counts down.</p>') + '<div class="passage">';
+    h += '<div class="readgrid"><section class="card" id="rPassage"><div class="row between"><h2>' + esc(d.title) + '</h2><span role="timer" data-timer="practice" class="timer">' + (d.parts ? "60:00" : "20:00") + '</span></div>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3><p class="note">The real test gives 60 minutes for all three passages; the timer counts down.</p>' : '<p class="note">You have about 20 minutes per passage in the real test; the timer counts down.</p>') + '<div class="passage">';
     (cp.paragraphs || []).forEach(function (pg) { h += '<p><b>' + esc(pg.label) + '</b>' + esc(pg.text) + '</p>'; });
-    h += '</div></section><section class="card" id="rQuestions"><h2>Questions</h2>' + groupsHtml(d) + checkRow() + '</section></div></div>';
+    h += '</div></section><section class="card" id="rQuestions"><h2>Questions</h2>' + groupsHtml(d) + (nextPartRow(d) || checkRow()) + '</section></div></div>';
     return h;
   }
   function listeningHtml() {
     var p = ui.practice, d = p.data;
-    var cp = d.parts ? d.parts[p.part || 0] : d;
-    var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3>' : "") + '<p class="note">' + esc(cp.context || "") + '</p>';
-    if (!canSay()) h += '<p class="note">Audio isn’t available here. Read the transcript instead, then answer from memory.</p>';
-    else {
-      var locked = p.exam && p.plays >= 1 && !p.checked;
-      h += '<div class="row"><button class="btn" data-act="playL"' + (p.playing || locked ? " disabled" : "") + '>' + ICON.sound + (p.plays ? " Play again" : " Play recording") + '</button>' + (p.playing ? '<button class="btn ghost" data-act="stopL">Stop</button>' : "") + '</div>' + (locked ? '<p class="note">Exam mode: you’ve heard it once. Check your answers to unlock replay and the transcript.</p>' : "");
-    }
-    h += '<p class="note">Read all the questions first, as you would in the test. Spelling counts.</p>' + groupsHtml(d) + checkRow();
-    if (p.checked || !canSay()) {
-      h += '<details' + (p.script ? " open" : "") + '><summary class="textbtn">Show transcript</summary><div class="passage">';
+    var cp = d.parts ? d.parts[p.part || 0] : d, locked = p.exam && p.plays >= 1 && !p.checked, audio = canSay() && !p.audioFail;
+    var h = '<div class="drill"><div class="jumpbar">';
+    if (audio) h += p.playing ? '<button class="btn small" data-act="stopL">■ Stop</button>' : '<button class="btn small" data-act="playL"' + (locked ? " disabled" : "") + '>▶ ' + (p.plays ? "Play again" : "Play") + '</button>';
+    h += '<button class="btn small ghost" data-act="jumpQ" data-to="lQuestions">Questions</button><span role="timer" data-timer="practice" data-cls="small jt" class="timer small jt">0:00</span><button class="btn small ghost" data-act="closeDrill" aria-label="Close exercise">✕</button></div>';
+    h += '<section class="card" id="lTop"><h2>' + esc(d.title) + '</h2>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3>' : "") + '<p class="note">' + esc(cp.context || "") + '</p>';
+    if (!audio) h += '<p class="note">' + (p.audioFail ? "The audio couldn’t play on this device. " : "Audio isn’t available here. ") + 'Read the transcript below once, close it, then answer from memory. To hear recordings, install an English voice (Android: Settings → Text-to-speech → Install voice data).</p>';
+    else h += locked ? '<p class="note">Exam mode: you’ve heard ' + (d.parts ? "this section" : "it") + ' once. Check your answers to unlock replay and the transcript.</p>' : '<p class="note">Tap ▶ Play at the top. ' + (p.exam ? "Exam mode: one play only." : "") + '</p>';
+    var showScript = p.checked || !audio;
+    if (showScript) {
+      h += '<details' + (p.script ? " open" : "") + '><summary class="textbtn">' + (p.checked ? "Show transcript" : "Read the transcript") + '</summary><div class="passage">';
       curLines(d).forEach(function (l) { h += '<p><b>' + esc(l.speaker) + ':</b> ' + esc(l.text) + '</p>'; });
       h += '</div></details>';
-    }
-    return h + '</section>';
+    } else if (!p.checked) h += '<button class="textbtn" data-act="audioFail">Can’t hear anything? Read the transcript instead</button>';
+    h += '</section><section class="card" id="lQuestions"><h2>Questions</h2><p class="note">Read all the questions first, as you would in the test. Spelling counts.</p>' + groupsHtml(d) + (nextPartRow(d) || checkRow()) + '</section></div>';
+    return h;
+  }
+  function nextPartRow(d) {
+    var p = ui.practice;
+    if (!d.parts || p.checked || (p.part || 0) >= d.parts.length - 1) return "";
+    var n = (p.part || 0) + 1;
+    return '<button class="btn wide big" data-act="setPart" data-n="' + n + '">Next: ' + (d.kind === "reading" ? "Passage " : "Section ") + (n + 1) + ' →</button><p class="note center">Check the whole test after the last ' + (d.kind === "reading" ? "passage" : "section") + '.</p>';
   }
   function gapContext(g, i, q) {
     if (g.outline) {
@@ -1447,8 +1528,9 @@
     if (!d.parts) return "";
     var p = ui.practice, base = 0;
     return '<div class="parttabs" role="group" aria-label="' + (d.kind === "reading" ? "Passages" : "Sections") + '">' + d.parts.map(function (pt, i) {
-      var n = groupsOf(d).filter(function (g) { return g._part === i; }).reduce(function (a, g) { return a + (g.questions || []).length; }, 0), from = base + 1; base += n;
-      return '<button data-act="setPart" data-n="' + i + '" aria-pressed="' + ((p.part || 0) === i) + '">' + (d.kind === "reading" ? "Passage " : "Section ") + (i + 1) + '<span>Q' + from + '–' + base + '</span></button>';
+      var gs = groupsOf(d).filter(function (g) { return g._part === i; }), n = gs.reduce(function (a, g) { return a + marksOfGroup(g); }, 0), from = base + 1; base += n;
+      var done = gs.every(function (g) { var gi = groupsOf(d).indexOf(g); return (g.questions || []).every(function (q, qi) { var a = p.answers[gi + "-" + qi]; return Array.isArray(a) ? a.length : (a != null && String(a).trim() !== ""); }); });
+      return '<button data-act="setPart" data-n="' + i + '" aria-pressed="' + ((p.part || 0) === i) + '">' + (d.kind === "reading" ? "Passage " : "Section ") + (i + 1) + '<span>Q' + from + '–' + base + (done ? " ✓" : "") + '</span></button>';
     }).join("") + '</div>';
   }
   function testToDrill(t) {
@@ -1467,7 +1549,7 @@
     });
     return { got: Math.max(0, got), tot: tot };
   }
-  function rawToBand(kind, raw, tot) {
+  function testBand(kind, raw, tot) {
     var r = Math.round(raw * 40 / Math.max(1, tot)), table = kind === "reading" ? D.READING_BANDS : D.LISTENING_BANDS;
     for (var i = 0; i < table.length; i++) if (r >= table[i][0]) return table[i][1];
     return r >= 2 ? 2 : 1;
@@ -1475,10 +1557,10 @@
   function drillScore(d) { var p = ui.practice; return allQs(d).filter(function (x) { return answerOk(x.q, p.answers[x.key], x.g); }).length; }
   function checkRow() {
     var p = ui.practice;
-    if (!p.checked) return p.blankWarn ? '<div class="notice card"><b>' + p.blankWarn + ' questions are still blank</b><div class="grid2"><button class="btn ghost" data-act="keepAnswering">Keep answering</button><button class="btn" data-act="checkAnyway">Check anyway</button></div></div>' : '<button class="btn wide big" data-act="checkDrill">Check answers</button>';
+    if (!p.checked) return p.blankWarn ? '<div class="notice card"><b>' + (p.blankWarn === 1 ? "1 question is" : p.blankWarn + " questions are") + ' still blank</b><div class="grid2"><button class="btn ghost" data-act="keepAnswering">Keep answering</button><button class="btn" data-act="checkAnyway">Check anyway</button></div></div>' : '<button class="btn wide big" data-act="checkDrill">Check answers</button>';
     var tot = allQs(p.data).length, sc = drillScore(p.data), wrong = tot - sc;
     if (p.data.test) { var tm = testMarks(p.data); tot = tm.tot; sc = tm.got; wrong = tot - sc; }
-    var h = (p.data.test ? '<div class="bandbig"><b>Band ' + band(rawToBand(p.data.kind, sc, tot)) + '</b><span class="muted">estimated from a typical raw-score conversion · Academic ' + (p.data.kind === "reading" ? "Reading" : "Listening") + '</span></div>' : "") + '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">' + (wrong ? Math.round(100 * sc / Math.max(1, tot)) + '% correct' + ((p.answeredN || tot) > sc ? " · wrong answers saved to your mistake log" : " · blanks are not logged") : "Perfect score!") + '</span></div>';
+    var h = (p.data.test ? '<div class="bandbig"><b>Band ' + band(testBand(p.data.kind, sc, tot)) + '</b><span class="muted">estimated from a typical raw-score conversion · Academic ' + (p.data.kind === "reading" ? "Reading" : "Listening") + '</span></div>' : "") + '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">' + (wrong ? Math.round(100 * sc / Math.max(1, tot)) + '% correct' + ((p.answeredN || tot) > sc ? " · wrong answers saved to your mistake log" : " · blanks are not logged") : "Perfect score!") + '</span></div>';
     h += '<div class="grid2"><button class="btn ghost" data-act="retryDrill">Try again</button>' + (nextBuiltIn() ? '<button class="btn" data-act="nextBuiltIn">Next exercise</button>' : (aiReady() ? '<button class="btn" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Next drill (AI)</button>' : '<button class="btn" data-act="closeDrill">Back to list</button>')) + '</div>';
     return h;
   }
@@ -1548,10 +1630,10 @@
       }
     }
     var mf = pr.mform;
-    h += '<details><summary class="textbtn">Add a mistake</summary><div class="grid2" style="margin-top:8px"><label class="field">Skill<select data-ch="mf_skill">' + ["Listening", "Reading", "Writing", "Speaking", "Vocabulary"].map(function (s) { return '<option' + (s === mf.skill ? " selected" : "") + '>' + s + '</option>'; }).join("") + '</select></label><span></span></div><label class="field">What I did wrong<input type="text" data-in="mm_wrong" value="' + esc(mf.wrong) + '"></label><label class="field">Correct version<input type="text" data-in="mm_right" value="' + esc(mf.right) + '"></label><label class="field">Rule or note (optional)<input type="text" data-in="mm_note" value="' + esc(mf.note) + '"></label><button class="btn small" data-act="saveMistake" style="justify-self:start">Save mistake</button></details>';
+    h += '<details' + (pr.mformOpen ? " open" : "") + '><summary class="textbtn">Add a mistake</summary><div class="grid2" style="margin-top:8px"><label class="field">Skill<select data-ch="mf_skill">' + ["Listening", "Reading", "Writing", "Speaking", "Vocabulary"].map(function (s) { return '<option' + (s === mf.skill ? " selected" : "") + '>' + s + '</option>'; }).join("") + '</select></label><span></span></div><label class="field">What I did wrong<input type="text" data-in="mm_wrong" value="' + esc(mf.wrong) + '"></label><label class="field">Correct version<input type="text" data-in="mm_right" value="' + esc(mf.right) + '"></label><label class="field">Rule or note (optional)<input type="text" data-in="mm_note" value="' + esc(mf.note) + '"></label><button class="btn small" data-act="saveMistake" style="justify-self:start">Save mistake</button></details>';
     h += '<label class="field">Show<select data-ch="mfilter"><option value="all">All skills</option>' + ["Listening", "Reading", "Writing", "Speaking", "Vocabulary"].map(function (s) { return '<option' + (s === pr.mfilter ? " selected" : "") + '>' + s + '</option>'; }).join("") + '</select></label>';
     if (!filtered.length) h += '<p class="empty">Mistakes from drills and AI feedback land here automatically, or add your own.</p>';
-    filtered.slice(0, pr.mAll ? 200 : 10).forEach(function (x) {
+    if (!pr.mquiz) filtered.slice(0, pr.mAll ? 200 : 10).forEach(function (x) {
       h += '<div class="mistake"><div class="row between"><span class="note">' + esc(x.skill) + ' · ' + esc(short(x.date)) + (x.source ? " · " + esc(x.source) : "") + '</span><button class="iconbtn sm" data-act="delMistake" data-id="' + esc(x.id) + '" aria-label="Delete mistake">✕</button></div>' + confirmBlock("mistake:" + x.id, "Delete this mistake?") + '<span class="o" style="color:var(--bad)">' + esc(x.wrong) + '</span><span style="color:var(--good);font-weight:600">' + esc(x.right) + '</span>' + (x.note ? '<span class="muted small">' + esc(x.note) + '</span>' : "") + '</div>';
     });
     if (filtered.length > 10 && !pr.mAll) h += '<button class="btn ghost wide" data-act="mAll">Show all (' + filtered.length + ')</button>';
@@ -1616,7 +1698,8 @@
     dayPrev: function () { ui.sel = addDays(ui.sel, -1); render(); },
     dayNext: function () { ui.sel = addDays(ui.sel, 1); render(); },
     dayToday: function () { ui.sel = today(); render(); },
-    pickDay: function (el) { ui.sel = el.getAttribute("data-day"); render(); },
+    todayReview: function () { location.hash = "#cards"; setTimeout(function () { ACT.startReview(); }, 30); },
+    pickDay: function (el) { ui.sel = el.getAttribute("data-day"); render(); var db = view.querySelector(".datebar"); if (db && db.scrollIntoView) db.scrollIntoView({ block: "start", behavior: "smooth" }); },
     setType: function (el) { var r = dayRec(ui.sel); r.type = el.getAttribute("data-type"); writeDay(ui.sel, r); render(); },
 
     // cards
@@ -1632,7 +1715,7 @@
       if (m === "match") return startMatch();
       if (m === "cloze") return startCloze();
       if (m === "difficult") {
-        var s = srs(), ids = deckCards(ui.cards.deck).filter(function (c) { var st = s.cards[c.id]; return st && (st.lapses || 0) >= 2; }).map(function (c) { return c.id; });
+        var s = srs(), ids = deckCards(ui.cards.deck).filter(function (c) { var st = s.cards[c.id]; return st && isDifficult(st); }).map(function (c) { return c.id; });
         if (!ids.length) { toast("No difficult words yet. Words you forget twice will collect here."); return; }
         return startSession(shuffle(ids));
       }
@@ -1641,6 +1724,7 @@
     moreEx: function () { ui.cards.session.more = true; var sc = view.querySelector(".face.back"); var top = sc ? sc.scrollTop : 0; render(); var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
     exLevel: function (el) { var sc = view.querySelector(".face.back"), top = sc ? sc.scrollTop : 0; ui.noAnim = true; setSettings({ exLevel: el.getAttribute("data-v") }); render(); ui.noAnim = false; var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
     nextBatch: function () { var q = buildQueue(ui.cards.deck); if (!q.length) { ui.cards.mode = "home"; render(); return; } startSession(q); },
+    toggleAdd: function () { ui.cards.addOpen = !ui.cards.addOpen; render(); if (ui.cards.addOpen) { var aw = view.querySelector('[data-in="add_w"]'); if (aw) aw.focus(); } },
     showMoreCards: function () { ui.cards.showN = (ui.cards.showN || 40) + 50; render(); },
     clearFilters: function () { ui.cards.b = { deck: "all", level: "all", status: "all", pos: "all" }; ui.cards.search = ""; render(); },
     studyFiltered: function () { var ids = filterCards(browseFilter()).map(function (c) { return c.id; }); var s = srs(); ids.sort(function (a, b) { return ((s.cards[a] || {}).due || 0) - ((s.cards[b] || {}).due || 0); }); startSession(ids); },
@@ -1651,8 +1735,8 @@
       if (m === "match") return startMatch(pool);
     },
     clozeCheck: function () { clozeCheck(); },
-    clozeHint: function () { ui.cards.cloze.hint = true; render(); var i = $("clozeInput"); if (i) i.focus(); },
-    clozeNext: function () { var cz = ui.cards.cloze; cz.i++; cz.input = ""; cz.result = null; cz.hint = false; render(); var i = $("clozeInput"); if (i) i.focus(); },
+    clozeHint: function () { var cz = ui.cards.cloze; if (cz.hint) { cz.input = ""; clozeCheck(true); return; } cz.hint = true; render(); var i = $("clozeInput"); if (i) i.focus(); },
+    clozeNext: function () { var cz = ui.cards.cloze; if (cz.i + 1 >= cz.items.length) logVocabDrill(cz.items.length); cz.i++; cz.input = ""; cz.result = null; cz.hint = false; render(); var i = $("clozeInput"); if (i) i.focus(); },
     startReview: function () {
       var q = buildQueue(ui.cards.deck);
       if (!q.length) { toast("Nothing to review here right now."); return; }
@@ -1683,7 +1767,7 @@
     spellSaySlow: function () { var sp = ui.cards.spell; say(cardById(sp.items[sp.i]).w, 0.7); },
     spellCheck: function () { spellCheck(); },
     spellNext: function () {
-      var sp = ui.cards.spell; sp.i++; sp.input = ""; sp.result = null; render();
+      var sp = ui.cards.spell; if (sp.i + 1 >= sp.items.length) logVocabDrill(sp.items.length); sp.i++; sp.input = ""; sp.result = null; render();
       if (sp.i < sp.items.length) { say(cardById(sp.items[sp.i]).w); var inp = $("spellInput"); if (inp) inp.focus(); }
     },
     quizPick: function (el) {
@@ -1693,7 +1777,7 @@
       else { var s = srs(); if (s.cards[it.id]) { s.cards[it.id].due = Date.now(); saveSrs(s); } }
       render();
     },
-    quizNext: function () { var qz = ui.cards.quiz; qz.i++; qz.picked = null; render(); },
+    quizNext: function () { var qz = ui.cards.quiz; if (qz.i + 1 >= qz.items.length) logVocabDrill(qz.items.length); qz.i++; qz.picked = null; render(); },
     matchPick: function (el) {
       var m = ui.cards.match, side = el.getAttribute("data-side"), id = el.getAttribute("data-id");
       if (m.done.indexOf(id) !== -1) return;
@@ -1708,7 +1792,7 @@
           var best = 0; try { best = +localStorage.getItem("ielts-match-best") || 0; } catch (e) {}
           m.newBest = !best || m.secs < best;
           if (m.newBest) { best = Math.round(m.secs); try { localStorage.setItem("ielts-match-best", String(best)); } catch (e) {} }
-          m.best = best;
+          m.best = best; logVocabDrill(m.items.length);
         }
       } else {
         m.mistakes++; m.wrong = { L: L, R: R };
@@ -1749,8 +1833,20 @@
     showAllCards: function () { ui.cards.showAll = true; render(); },
 
     // writing
-    wTask: function (el) { ui.write.task = +el.getAttribute("data-n"); tSet("write", (ui.write.task === 1 ? 20 : 40) * 60, "down"); render(); },
-    nextPrompt: function () { var w = ui.write; w.custom = null; if (w.task === 1) w.p1++; else w.pi++; render(); },
+    wTask: function (el) {
+      var w = ui.write, n = +el.getAttribute("data-n"); if (n === w.task) return;
+      w.drafts = w.drafts || {}; w.timers = w.timers || {};
+      w.drafts[w.task] = { text: w.text, custom: w.custom, savedId: w.savedId, dirty: w.dirty, result: w.result }; w.timers[w.task] = T.write;
+      w.task = n; var d = w.drafts[n] || {};
+      w.text = d.text || ""; w.custom = d.custom || null; w.savedId = d.savedId || null; w.dirty = !!d.dirty; w.result = d.result || null;
+      if (w.timers[n]) T.write = w.timers[n]; else tSet("write", (n === 1 ? 20 : 40) * 60, "down");
+      saveDrafts(); render();
+    },
+    nextPrompt: function () {
+      var w = ui.write;
+      if (w.text && w.text.trim() && !w.discardOk) { ui.confirm = { key: "essayNew", run: function () { w.discardOk = true; ACT.newEssay(); } }; render(); return; }
+      w.custom = null; if (w.task === 1) w.p1++; else w.pi++; render();
+    },
     togglePlan: function () { ui.write.plan = !ui.write.plan; render(); },
     aiPrompt: async function () {
       var w = ui.write;
@@ -1790,7 +1886,7 @@
         var r = await aiCall("grade", prompt, "default");
         w.result = r;
         var id = w.savedId || ("e_" + uid());
-        put(id, { date: today(), task: p.task, ptype: p.type, prompt: p.q, text: w.text, words: s.words, minutes: mins, result: r });
+        put(id, { date: today(), task: p.task, ptype: p.type, prompt: p.q, kind: p.kind || null, charts: p.charts || null, text: w.text, words: s.words, minutes: mins, result: r });
         w.savedId = id;
         autoTick(p.task === 2 ? ["essay"] : []);
         render();
@@ -1801,11 +1897,11 @@
       if (s.words < 20) { toast("Write a bit more before saving."); return; }
       var id = w.savedId || ("e_" + uid());
       put(id, { date: today(), task: p.task, ptype: p.type, prompt: p.q, text: w.text, words: s.words, minutes: Math.round(tElapsed("write") / 60), result: w.result || null });
-      w.savedId = id; toast("Essay saved."); render();
+      w.savedId = id; w.dirty = false; toast("Essay saved."); render();
     },
     newEssay: function () {
       var w0 = ui.write;
-      if (w0.text && w0.text.trim() && !w0.savedId && !w0.discardOk) { ui.confirm = { key: "essayNew", run: function () { w0.discardOk = true; ACT.newEssay(); } }; render(); return; }
+      if (w0.text && w0.text.trim() && w0.dirty && !w0.discardOk) { ui.confirm = { key: "essayNew", run: function () { w0.discardOk = true; ACT.newEssay(); } }; render(); return; }
       w0.discardOk = false;
       var w = ui.write; w.text = ""; w.result = null; w.savedId = null; w.custom = null; if (w.task === 1) w.p1++; else w.pi++; tSet("write", (w.task === 1 ? 20 : 40) * 60, "down"); saveDrafts(); render(); },
     viewEssay: function (el) { ui.write.view = el.getAttribute("data-id"); render(); window.scrollTo(0, 0); },
@@ -1830,13 +1926,17 @@
 
     // speaking
     sPart: function (el) { var sp = ui.speak; sp.part = +el.getAttribute("data-n"); sp.phase = "idle"; sp.secs = 0; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); render(); },
-    nextCue: function () { var sp = ui.speak; sp.idx++; sp.phase = "idle"; sp.notes = ""; sp.result = null; sp.savedId = null; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); render(); },
-    nextP1: function () { var sp = ui.speak; sp.p1++; sp.result = null; sp.savedId = null; render(); },
+    nextCue: function () { var sp = ui.speak; resetRec(); sp.text = ""; sp.check = []; saveDrafts(); sp.idx++; sp.phase = "idle"; sp.notes = ""; sp.result = null; sp.savedId = null; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); render(); },
+    nextP1: function () { var sp = ui.speak; resetRec(); sp.text = ""; sp.check = []; saveDrafts(); sp.p1++; sp.result = null; sp.savedId = null; render(); },
     sayQs: function () { var p = D.PART1[ui.speak.p1 % D.PART1.length]; say(p.qs.join(" ... ")); },
     sayP3: function () { var c = D.PART2[ui.speak.idx % D.PART2.length]; say(c.p3.join(" ... ")); },
-    startPrep: function () { var sp = ui.speak; sp.phase = "prep"; sp.notes = ""; sp.text = ""; sp.result = null; sp.savedId = null; sp.secs = 0; tSet("speak", 60, "down"); tStart("speak"); render(); },
-    skipPrep: function () { var sp = ui.speak; sp.phase = "talk"; tSet("speak", 120, "down"); tStart("speak"); render(); },
-    endTalk: function () { var sp = ui.speak; sp.secs = tElapsed("speak"); tPause("speak"); sp.phase = "done"; render(); },
+    startPrep: function () {
+      var sp0 = ui.speak;
+      if (sp0.phase === "done" && (sp0.text || "").trim() && !sp0.savedId && !sp0.retryOk) { ui.confirm = { key: "retryTalk", run: function () { sp0.retryOk = true; ACT.startPrep(); } }; render(); return; }
+      sp0.retryOk = false; resetRec();
+      var sp = ui.speak; sp.phase = "prep"; sp.notes = ""; sp.text = ""; sp.result = null; sp.savedId = null; sp.secs = 0; tSet("speak", 60, "down"); tStart("speak"); render(); },
+    skipPrep: function () { var sp = ui.speak; sp.phase = "talk"; tSet("speak", 120, "down"); tStart("speak"); render(); if (sp.autoRec !== false && canRecord() && REC.state !== "recording") ACT.recStart(); },
+    endTalk: function () { var sp = ui.speak; sp.secs = tElapsed("speak"); tPause("speak"); sp.phase = "done"; if (REC.state === "recording") recStop(); render(); },
     sTimer: function (el) { var op = el.getAttribute("data-op"); if (op === "start") tStart("speak"); else if (op === "pause") tPause("speak"); else tSet("speak", 0, "up"); paintTimers(); },
     mic: function () {
       if (!DICT) return;
@@ -1868,7 +1968,7 @@
       var sp = ui.speak;
       if (textStats(sp.text).words < 5 && !REC.blob) { toast("Record or type your answer first."); return; }
       var id = sp.savedId || ("s_" + uid());
-      put(id, { date: today(), part: sp.part, prompt: speakPrompt(), text: sp.text, seconds: Math.round(speakSecs()), result: sp.result || null });
+      put(id, { date: today(), part: sp.part, prompt: speakPrompt(), text: sp.text, seconds: Math.round(speakSecs()), recSecs: REC.blob ? REC.secs : 0, selfcheck: (sp.check || []).filter(Boolean).length, result: sp.result || null });
       sp.savedId = id; autoTick(["speak"]);
       if (REC.blob) { var bl = REC.blob, rs = REC.secs; idb(function (st) { st.put({ blob: bl, secs: rs }, id); }); }
       toast("Session saved" + (REC.blob ? " with your recording." : ".")); render();
@@ -1890,8 +1990,10 @@
       }).catch(function () { REC.err = "Microphone access was blocked. Allow the microphone for this site (in the Claude app it may not be available; use the offline app)."; render(); });
     },
     recStop: function () { recStop(); },
+    recAgain: function () { ui.confirm = { key: "recAgain", run: function () { setTimeout(ACT.recStart, 0); } }; render(); },
+    recDelAsk: function () { ui.confirm = { key: "recDel", run: function () { ACT.recDel(); } }; render(); },
     recDel: function () { if (REC.url) try { URL.revokeObjectURL(REC.url); } catch (e) {} REC.url = null; REC.blob = null; REC.secs = 0; render(); },
-    newSpeak: function () { var sp = ui.speak; sp.text = ""; sp.notes = ""; sp.result = null; sp.savedId = null; sp.phase = "idle"; sp.partial = ""; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); saveDrafts(); render(); },
+    newSpeak: function () { var sp = ui.speak; resetRec(); sp.check = []; sp.text = ""; sp.notes = ""; sp.result = null; sp.savedId = null; sp.phase = "idle"; sp.partial = ""; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); saveDrafts(); render(); },
     viewSpeak: function (el) { ui.speak.view = el.getAttribute("data-id"); render(); window.scrollTo(0, 0); },
     closeSpeakView: function () { ui.speak.view = null; render(); },
     delSpeak: function (el) { var id = el.getAttribute("data-id"); ui.confirm = { key: "speak:" + id, run: function () { del(id); idb(function (st) { st.delete(id); }); ui.speak.view = null; } }; render(); },
@@ -1916,8 +2018,15 @@
       var t = (window.IELTS_TESTS || []).filter(function (x) { return x.id === el.getAttribute("data-id"); })[0]; if (!t) return;
       loadDrill(testToDrill(t), null); ui.practice.sampleId = t.id;
     },
-    setPart: function (el) { var p = ui.practice; stopSay(); p.playing = false; p.part = +el.getAttribute("data-n"); if (!p.checked) p.plays = 0; render(); var t = document.getElementById(p.kind === "reading" ? "rPassage" : "rQuestions") || document.querySelector(".parttabs"); if (t && t.scrollIntoView) t.scrollIntoView({ block: "start" }); },
-    keepAnswering: function () { ui.practice.blankWarn = 0; render(); },
+    setPart: function (el) { var p = ui.practice; stopSay(); p.playing = false; p.part = +el.getAttribute("data-n"); p.plays = (p.playsBy || {})[p.part] || 0; render(); var t = document.getElementById(p.kind === "reading" ? "rPassage" : "lTop") || document.querySelector(".parttabs"); if (t && t.scrollIntoView) t.scrollIntoView({ block: "start" }); },
+    audioFail: function () { var p = ui.practice; stopSay(); p.playing = false; p.audioFail = true; p.script = true; render(); },
+    keepAnswering: function () {
+      var p = ui.practice; p.blankWarn = 0;
+      var first = allQs(p.data).filter(function (x) { var a = p.answers[x.key]; return Array.isArray(a) ? !a.length : (a == null || String(a).trim() === ""); })[0];
+      if (first && p.data.parts) p.part = first.g._part || 0;
+      render();
+      if (first) { var el = view.querySelector('[data-q="' + first.key + '"]'); if (el) { el.scrollIntoView({ block: "center" }); try { el.focus(); } catch (e) {} } }
+    },
     checkAnyway: function () { var p = ui.practice; p.blankOk = true; p.blankWarn = 0; ACT.checkDrill(); },
     retryDrill: function () { var p = ui.practice, sid = p.sampleId; loadDrill(p.data, p.bankId); p.sampleId = sid; },
     nextBuiltIn: function () { var x = nextBuiltIn(); if (!x) return; var sid = x.id; loadDrill(x, null); ui.practice.sampleId = sid; },
@@ -1952,10 +2061,11 @@
       });
       if (p.bankId) markBank(p.bankId, sc);
       if (p.data.test) { var tmk = testMarks(d); sc = tmk.got; total = tmk.tot; }
-      if (p.sampleId) { var ss = Object.assign({}, get("samplescores") || {}), prevBest = parseInt(ss[p.sampleId], 10); if (!isNaN(prevBest) && prevBest > sc) { /* keep best */ } else ss[p.sampleId] = sc + "/" + total + (p.data.test ? " · band " + band(rawToBand(p.kind, sc, total)) : ""); put("samplescores", ss); }
+      if (p.sampleId) { var ss = Object.assign({}, get("samplescores") || {}), prevBest = parseInt(ss[p.sampleId], 10); if (!isNaN(prevBest) && prevBest > sc) { /* keep best */ } else ss[p.sampleId] = sc + "/" + total + (p.data.test ? " · band " + band(testBand(p.kind, sc, total)) : ""); put("samplescores", ss); }
       if (answered >= qsAll.length / 2) autoTick(["test"]);
       p.wrongN = total - sc; p.answeredN = answered;
       render();
+      setTimeout(function () { var bb = view.querySelector(".bandbig"); if (bb) bb.scrollIntoView({ block: "center" }); }, 30);
     },
     playL: function () {
       var p = ui.practice, lines = curLines(p.data).filter(function (l) { return l.text; });
@@ -1966,8 +2076,8 @@
       var voices = ["buttery", "airy", "glassy", "rounded"];
       var done = function () {
         p.playing = false;
-        if (Date.now() - started > 2500) p.plays++;
-        else toast("Couldn’t play the audio. Install an English voice (see Progress → Backup and offline), or read the transcript.");
+        if (Date.now() - started > 2500) { p.playsBy = p.playsBy || {}; p.playsBy[p.part || 0] = (p.playsBy[p.part || 0] || 0) + 1; p.plays = p.playsBy[p.part || 0]; }
+        else { p.audioFail = true; p.script = true; toast("The audio couldn’t play on this device, so the transcript is shown instead."); }
         if (ui.tab === "practice") softRender();
       };
       if (TTS) {
@@ -1994,6 +2104,8 @@
     saveMock: function () {
       var f = ui.progress.form;
       if (overallBand(f.L, f.R, f.W, f.S) === null) { toast("Enter all four bands (or raw scores for Listening and Reading)."); return; }
+      var badB = ["L", "R", "W", "S"].filter(function (k) { var v = +f[k]; return !(v >= 1 && v <= 9 && (v * 2) % 1 === 0); });
+      if (badB.length) { toast("Bands must be 1–9 in half steps (e.g. 6.5). Check: " + badB.map(function (k) { return { L: "Listening", R: "Reading", W: "Writing", S: "Speaking" }[k]; }).join(", ") + "."); return; }
       var m = get("mocks"), list = ((m && m.list) || []).concat([{ id: uid(), date: f.date || today(), L: +f.L, R: +f.R, W: +f.W, S: +f.S }]);
       put("mocks", { list: list, updated: new Date().toISOString() });
       if ((f.date || today()) === today()) autoTick(["mock"]);
@@ -2009,7 +2121,7 @@
       var mf = ui.progress.mform;
       if (!mf.wrong.trim() || !mf.right.trim()) { toast("Fill in the mistake and the correct version."); return; }
       put("m_" + uid(), { skill: mf.skill, wrong: mf.wrong.trim(), right: mf.right.trim(), note: mf.note.trim(), date: today(), source: "" });
-      ui.progress.mform = { skill: mf.skill, wrong: "", right: "", note: "" }; toast("Mistake saved."); render();
+      ui.progress.mform = { skill: mf.skill, wrong: "", right: "", note: "" }; ui.progress.mformOpen = true; toast("Mistake saved."); render(); var mw = view.querySelector('[data-in="mm_wrong"]'); if (mw) mw.focus();
     },
     delMistake: function (el) { var id = el.getAttribute("data-id"); ui.confirm = { key: "mistake:" + id, run: function () { del(id); } }; render(); },
     mQuiz: function () { var ids = shuffle(docsWithPrefix("m_").map(function (x) { return x.id; })).slice(0, 5); ui.progress.mquiz = { items: ids, i: 0, show: false }; render(); },
@@ -2110,6 +2222,10 @@
     render();
     if (autoPlay && sess.i < sess.queue.length) { var nx = cardById(sess.queue[sess.i]); if (nx) say(nx.w); }
   }
+  function logVocabDrill(n) {
+    var s = srs(); s.drillLog = s.drillLog || {}; s.drillLog[today()] = (s.drillLog[today()] || 0) + n; saveSrs(s);
+    if ((s.drillLog[today()] || 0) + (s.log[today()] || 0) >= 20) autoTick(["vocab", "vocabRead"]);
+  }
   function estMin(n) { return Math.max(1, Math.round(n * 12 / 60)); }
   function restoreCardFilter() {
     var c = ui.cards; if (c.restored) return; c.restored = true;
@@ -2177,22 +2293,24 @@
     render(); window.scrollTo(0, 0);
     var inp = $("clozeInput"); if (inp) inp.focus();
   }
-  function clozeCheck() {
+  function clozeCheck(reveal) {
     var cz = ui.cards.cloze; if (!cz || cz.result) return;
+    if (!reveal && !String(cz.input || "").trim()) { toast("Type the word, or tap Hint."); var ci = $("clozeInput"); if (ci) ci.focus(); return; }
     var it = cz.items[cz.i], ok = norm(cz.input) === norm(it.ans);
     cz.result = ok ? "right" : "wrong";
     var s = srs();
     if (ok) cz.score++;
     else { cz.wrong.push(it.ans); if (s.cards[it.id]) { s.cards[it.id].due = Math.min(s.cards[it.id].due, Date.now()); saveSrs(s); } }
-    render();
+    render(); var fi = $("clozeInput"); if (fi) fi.focus();
   }
   function spellCheck() {
     var sp = ui.cards.spell; if (!sp || sp.result) return;
+    if (!String(sp.input || "").trim()) { toast("Type what you hear first."); var si = $("spellInput"); if (si) si.focus(); return; }
     var x = cardById(sp.items[sp.i]);
     var ok = norm(sp.input) === norm(x.w);
     sp.result = ok ? "right" : "wrong";
     if (ok) sp.score++; else sp.wrong.push(x.w);
-    render();
+    render(); var fs = $("spellInput"); if (fs) fs.focus();
   }
 
   // ================= events =================
@@ -2206,6 +2324,7 @@
   view.addEventListener("toggle", function (e) {
     var d = e.target; if (!d || !d.getAttribute || !d.open) return;
     var id = d.getAttribute("data-card"); if (!id) return;
+    ui.cards.openId = id;
     var body = d.querySelector(".body"); if (body && !body.innerHTML) body.innerHTML = rowBody(id);
   }, true);
   view.addEventListener("change", function (e) {
@@ -2218,6 +2337,7 @@
     } else if (k === "deck") { ui.cards.deck = v; ui.cards.showAll = false; render(); }
     else if (k === "deck2") { ui.cards.deck = v; setSettings({ cardDeck: v }); render(); }
     else if (k === "add_topic") ui.cards.add.topic = v;
+    else if (k === "add_pos") ui.cards.add.pos = v;
     else if (k === "add_lvl") ui.cards.add.lvl = v;
     else if (k.indexOf("b_") === 0) { ui.cards.b[k.slice(2)] = v; ui.cards.showN = 40; render(); }
     else if (k === "rtype") { ui.practice.rtype = v; render(); }
@@ -2225,10 +2345,13 @@
     else if (k === "t2type") { ui.write.t2type = v; ui.write.pi = 0; ui.write.custom = null; render(); }
     else if (k === "lsec") { ui.practice.lsec = v; }
     else if (k === "ansm") { var cur = ui.practice.answers[el.getAttribute("data-q")]; cur = Array.isArray(cur) ? cur.slice() : []; var ix = cur.indexOf(v); if (el.checked && ix === -1) cur.push(v); if (!el.checked && ix !== -1) cur.splice(ix, 1); ui.practice.answers[el.getAttribute("data-q")] = cur; }
+    if (k === "ansm") { var sy = window.scrollY; ui.practice.blankWarn = 0; render(); window.scrollTo(0, sy); }
     else if (k === "ltype") { ui.practice.ltype = v; render(); }
     else if (k === "exam") ui.practice.exam = el.checked;
-    else if (k === "ans") { ui.practice.answers[el.getAttribute("data-q")] = v; }
+    else if (k === "ans") { ui.practice.answers[el.getAttribute("data-q")] = v; if (ui.practice.blankWarn) { ui.practice.blankWarn = 0; var nb = view.querySelector(".notice.card"); if (nb) nb.outerHTML = '<button class="btn wide big" data-act="checkDrill">Check answers</button>'; } }
     else if (k === "mf_skill") ui.progress.mform.skill = v;
+    else if (k === "autoRec") { ui.speak.autoRec = el.checked; }
+    else if (k === "selfcheck") { ui.speak.check = ui.speak.check || []; ui.speak.check[+el.getAttribute("data-i")] = el.checked; }
     else if (k === "mfilter") { ui.progress.mfilter = v; ui.progress.mAll = false; render(); }
     else if (k === "restoreFile") {
       var f = el.files && el.files[0]; if (!f) return;
@@ -2243,22 +2366,26 @@
     else if (k === "set_sess") { setSettings({ session: +v }); render(); }
     else if (k === "set_exl") { setSettings({ exLevel: v }); render(); }
   });
+  var composing = false;
+  view.addEventListener("compositionstart", function () { composing = true; });
+  view.addEventListener("compositionend", function (e) { composing = false; e.target.dispatchEvent(new Event("input", { bubbles: true })); });
   view.addEventListener("input", function (e) {
     var el = e.target, k = el.getAttribute("data-in"); if (!k) return;
+    if ((e.isComposing || composing) && (k === "cardSearch" || k.indexOf("add_") === 0)) return;
     var v = el.value;
-    if (k === "essay") { ui.write.text = v; saveDrafts(); var st = $("essayStats"); if (st) st.innerHTML = statsHtml(v, ui.write.task); }
+    if (k === "essay") { ui.write.text = v; ui.write.dirty = true; saveDrafts(); var st = $("essayStats"); if (st) st.innerHTML = statsHtml(v, ui.write.task); }
     else if (k === "speakText") { ui.speak.text = v; saveDrafts(); var ss = $("speakStats"); if (ss) ss.innerHTML = speakStatsHtml(textStats(v), speakSecs()); }
     else if (k === "notes") ui.speak.notes = v;
     else if (k === "cardSearch") {
       ui.cards.search = v; ui.cards.showN = 40; clearTimeout(ui.cards.searchT);
-      ui.cards.searchT = setTimeout(function () { var cur = view.querySelector('[data-in="cardSearch"]'), pos = cur ? cur.selectionStart : 0; render(); var ni = view.querySelector('[data-in="cardSearch"]'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (x) {} } }, 220);
+      ui.cards.searchT = setTimeout(function () { if (composing) return; var cur = view.querySelector('[data-in="cardSearch"]'), pos = cur ? cur.selectionStart : 0; render(); var ni = view.querySelector('[data-in="cardSearch"]'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (x) {} } }, 220);
     }
     else if (k.indexOf("add_") === 0) { var was = !!(ui.cards.add.w || ui.cards.add.def); ui.cards.add[k.slice(4)] = v; if (k === "add_w" && !was && v) { render(); var ai2 = view.querySelector('[data-in="add_w"]'); if (ai2) { ai2.focus(); ai2.setSelectionRange(v.length, v.length); } } }
     else if (k === "useIt") ui.cards.session.use = v;
     else if (k === "spell") ui.cards.spell.input = v;
     else if (k === "cloze") ui.cards.cloze.input = v;
     else if (k === "ptopic") ui.practice.topic = v;
-    else if (k === "ans") ui.practice.answers[el.getAttribute("data-q")] = v;
+    else if (k === "ans") { ui.practice.answers[el.getAttribute("data-q")] = v; if (ui.practice.blankWarn) { ui.practice.blankWarn = 0; var nb2 = view.querySelector(".notice.card"); if (nb2) nb2.outerHTML = '<button class="btn wide big" data-act="checkDrill">Check answers</button>'; } }
     else if (k.indexOf("mf_") === 0) {
       var f = ui.progress.form, fk = k.slice(3); f[fk] = v;
       if (fk === "Lraw") { var lb = rawToBand(v, D.LISTENING_BANDS); if (lb !== null && v !== "") { f.L = lb; var li = view.querySelector('[data-in="mf_L"]'); if (li) li.value = lb; } }
@@ -2270,7 +2397,7 @@
     else if (k === "ai_key") { ui.progress.ai = ui.progress.ai || {}; ui.progress.ai.key = v; }
   });
   view.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && e.target.getAttribute("data-in") === "spell") { e.preventDefault(); spellCheck(); }
+    if (e.key === "Enter" && e.target.getAttribute("data-in") === "spell") { e.preventDefault(); if (ui.cards.spell.result) ACT.spellNext(); else spellCheck(); }
     if (e.key === "Enter" && e.target.getAttribute("data-in") === "cloze") { e.preventDefault(); if (ui.cards.cloze.result) ACT.clozeNext(); else clozeCheck(); }
     if (e.key === "Enter" && e.target.getAttribute("data-in") === "useIt") { e.preventDefault(); ACT.checkUse(); }
   });
@@ -2360,7 +2487,14 @@
   var installEvt = null;
   window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); installEvt = e; if (ui.tab === "progress") softRender(); });
   if ("serviceWorker" in navigator && !window.claude && (location.protocol === "https:" || location.hostname === "localhost")) {
-    navigator.serviceWorker.register("sw.js").catch(function () {});
+    var hadCtrl = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register("sw.js").then(function (reg) { try { if (navigator.onLine) reg.update().catch(function () {}); } catch (e) {} }).catch(function () {});
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!hadCtrl) { hadCtrl = true; return; }
+      var bar = document.createElement("div"); bar.className = "updatebar"; bar.innerHTML = 'A new version is ready. <button class="btn small" type="button">Reload</button>';
+      bar.querySelector("button").onclick = function () { location.reload(); };
+      document.body.appendChild(bar);
+    });
   }
   window.addEventListener("online", function () { softRender(); });
   window.addEventListener("offline", function () { softRender(); });
