@@ -1,4 +1,4 @@
-const CACHE = "ielts-prep-1795842573";
+const CACHE = "ielts-prep-1795844650";
 const SHELL = ["./", "./index.html", "./style.css", "./data.js", "./data2.js", "./data3.js", "./data_ex.js", "./data4.js", "./data5.js", "./data_ex2.js", "./data6.js", "./data7.js", "./app.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./fonts/manrope-latin-400-normal.woff2", "./fonts/manrope-latin-500-normal.woff2", "./fonts/manrope-latin-600-normal.woff2", "./fonts/manrope-latin-700-normal.woff2", "./fonts/fraunces-latin-600-normal.woff2"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

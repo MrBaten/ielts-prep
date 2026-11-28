@@ -513,3 +513,8 @@ summary .cefr + .lvl { margin-left: 6px; }
 .flipwrap.noanim { animation: none !important; }
 .bn.small { font-size: 14px; color: var(--muted); }
 @media (min-width: 1000px) { .readgrid #rPassage { top: 64px; } }
+
+/* v6: a11y + polish */
+.strip { grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.day { min-height: 28px; aspect-ratio: auto; }
+.notice.card { display: grid; gap: 10px; }

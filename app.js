@@ -370,7 +370,7 @@
   }
   function loadDrill(d, bankId) {
     var p = ui.practice; stopSay();
-    p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false; p.blankOk = false; p.heard = false;
+    p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false; p.blankOk = false; p.blankWarn = 0; p.heard = false;
     p.part = 0;
     if (p.kind === "reading") { tSet("practice", d.parts ? 3600 : 1200, "down"); tStart("practice"); } else tSet("practice", 0, "up");
     render();
@@ -722,7 +722,7 @@
       var on = r.done.indexOf(it.id) !== -1;
       h += '<li><label class="task' + (on ? " done" : "") + '" for="cb-' + it.id + '"><input type="checkbox" id="cb-' + it.id + '" data-ch="tick" data-id="' + it.id + '"' + (on ? " checked" : "") + '><span class="t">' + esc(it.t) + '</span><span class="m">' + fmtMin(it.m) + '</span></label></li>';
     });
-    h += '</ul><p class="note">Some items tick themselves: 20 card reviews, a marked essay, a saved speaking session, a finished drill or a logged mock test.</p></section>';
+    h += '</ul><p class="note">Some items tick themselves: finishing your review cards (or 20 reviews), a marked essay, a saved speaking session, a finished drill or a logged mock test.</p></section>';
 
     // record
     var streak = 0, cur = scoreOf(t).floor ? t : addDays(t, -1);
@@ -801,7 +801,7 @@
   function rowBody(id) {
     var x = cardById(id); if (!x) return "";
     var st = srs().cards[id];
-    var h = '<div>' + esc(x.def) + '</div>' + (x.bn ? '<div class="bn small">বাংলা: ' + esc(x.bn) + '</div>' : "") + sentList(x, false);
+    var h = '<div>' + esc(x.def) + '</div>' + (x.bn ? '<div class="bn small" lang="bn">বাংলা: ' + esc(x.bn) + '</div>' : "") + sentList(x, false);
     h += '<div class="row">' + speakBtn(x.w) + '<span class="note grow rowstat">' + (st ? (st.due > Date.now() ? "Next review " + short(keyOf(new Date(st.due))) : "Due now") + ((st.lapses || 0) ? " · forgotten " + st.lapses + "×" : "") : "") + '</span><button class="btn ghost small" data-act="cardNow" data-id="' + x.id + '">Review soon</button>' + (x.pre ? "" : '<button class="btn danger small" data-act="cardDel" data-id="' + x.id + '">Delete</button>') + '</div>' + confirmBlock("card:" + x.id, "Delete this card and its progress?");
     return h;
   }
@@ -845,7 +845,7 @@
   }
   function reviewControls() {
     var sess = ui.cards.session, s = srs(), st = s.cards[sess.queue[sess.i]];
-    if (!sess.revealed) return '<button class="btn big wide" data-act="reveal">Show answer</button><p class="note center">Tap the card to flip<span class="kbd"> · keyboard: space</span></p>';
+    if (!sess.revealed) return '<button class="btn big wide" data-act="reveal">Show answer</button><p class="note center" id="flipHint">Tap the card to flip<span class="kbd"> · keyboard: space or Enter</span></p>';
     var h = '<div class="rate">';
     [["again", "Again", 0], ["hard", "Hard", 1], ["good", "Good", 2], ["easy", "Easy", 3]].forEach(function (b) {
       h += '<button class="' + b[0] + '" data-act="rate" data-q="' + b[2] + '">' + b[1] + '<span>' + ivlLabel(st, b[2]) + '</span></button>';
@@ -871,10 +871,10 @@
     var tot = sess.total || sess.queue.length, extra = sess.queue.length - tot;
     var h = '<section class="card session">' + sessHead("cardsHome", Math.min(sess.i, tot), tot, (extra > 0 ? '<span class="chip quiet" title="Cards you marked Again come back once">' + (sess.i >= tot ? "repeat " + (sess.i - tot + 1) + "/" + extra : "+" + extra + " again") + '</span>' : "") + (canSay() ? autoBtn : ""));
     h += '<div class="flipwrap' + (ui.noAnim ? " noanim" : "") + '" id="flipwrap"><div class="swipe-tag again" id="tagAgain">Again</div><div class="swipe-tag good" id="tagGood">Good</div>';
-    h += '<div class="flipcard' + (sess.revealed ? " flipped" : "") + '" id="flipcard" tabindex="0" role="button" aria-label="Flashcard: ' + esc(x.w) + '. Tap to flip.">';
+    h += '<div class="flipcard' + (sess.revealed ? " flipped" : "") + '" id="flipcard" tabindex="0" aria-describedby="flipHint">';
     h += '<div class="face front"><div class="row between full"><span class="chip quiet">' + esc(D.TOPICS[x.topic] || "") + '</span><span><span class="cefr">' + esc(x.lvl) + '</span> <span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></span></div><div class="word">' + esc(x.w) + '</div><div class="pos">' + esc(x.pos || "") + ' · ' + esc(lvlName(x.lvl)) + '</div>' + speakBtn(x.w) + '<div class="hint">Do you know it? Say the meaning, then tap.</div></div>';
     h += '<div class="face back"><div class="row"><div class="word sm grow">' + esc(x.w) + '</div>' + speakBtn(x.w) + '</div><div class="def">' + esc(x.def) + '</div>';
-    if (x.bn) h += sess.bn ? '<div class="bn">' + esc(x.bn) + '</div>' : '<button class="textbtn" data-act="showBn">বাংলা অর্থ দেখুন</button>';
+    if (x.bn) h += sess.bn ? '<div class="bn" lang="bn">' + esc(x.bn) + '</div>' : '<button class="textbtn" lang="bn" data-act="showBn">বাংলা অর্থ দেখুন</button>';
     h += '<div class="row between"><span class="note">Examples</span>' + sentToggle() + '</div>' + sentList(x, true, sess.more ? 0 : 3);
     if (!sess.more && sentsFor(x).length > 3) h += '<button class="textbtn" data-act="moreEx">+' + (sentsFor(x).length - 3) + ' more examples</button>';
     h += '</div></div></div><div id="sessControls" class="controls">' + reviewControls() + '</div></section>';
@@ -1283,7 +1283,7 @@
     var bankEx = (window.IELTS_EXBANK || []).filter(function (x) { return x.kind === p.kind && (cur === "mixed" || x.qtype === cur); });
     if (cur !== "mixed" && bankEx.length) {
       var scs = get("samplescores") || {};
-      h += '<div class="exgrid" role="list">' + bankEx.map(function (x, i) { var sc = scs[x.id]; var diff = ["easier", "medium", "harder", "hardest"][Math.min(3, Math.round(i * 3 / Math.max(1, bankEx.length - 1)))]; return '<button role="listitem" class="exbtn' + (sc ? " done" : "") + '" data-act="openEx" data-id="' + esc(x.id) + '"><b>Exercise ' + (i + 1) + '</b><span>' + esc(x.title) + '</span><span class="row"><span class="chip quiet">' + diff + '</span>' + (sc ? '<span class="chip">best ' + esc(sc) + '</span>' : "") + '</span></button>'; }).join("") + '</div><p class="note">' + bankEx.length + ' built-in exercises for this type, easiest first. They all work offline.</p>';
+      h += '<div class="exgrid">' + bankEx.map(function (x, i) { var sc = scs[x.id]; var diff = ["easier", "medium", "harder", "hardest"][Math.min(3, Math.round(i * 3 / Math.max(1, bankEx.length - 1)))]; return '<button class="exbtn' + (sc ? " done" : "") + '" data-act="openEx" data-id="' + esc(x.id) + '"><b>Exercise ' + (i + 1) + '</b><span>' + esc(x.title) + '</span><span class="row"><span class="chip quiet">' + diff + '</span>' + (sc ? '<span class="chip">best ' + esc(sc) + '</span>' : "") + '</span></button>'; }).join("") + '</div><p class="note">' + bankEx.length + ' built-in exercises for this type, easiest first. They all work offline.</p>';
     }
     if (p.kind === "listening") h += (aiReady() ? '<label class="field">Section for a new AI drill<select data-ch="lsec">' + LSECTIONS.map(function (t) { return '<option' + (t === p.lsec ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label>' : "") + '<label class="choice"><input type="checkbox" data-ch="exam"' + (p.exam ? " checked" : "") + '> Exam mode: play the recording once only</label>';
     if (aiReady()) {
@@ -1475,7 +1475,7 @@
   function drillScore(d) { var p = ui.practice; return allQs(d).filter(function (x) { return answerOk(x.q, p.answers[x.key], x.g); }).length; }
   function checkRow() {
     var p = ui.practice;
-    if (!p.checked) return '<button class="btn wide big" data-act="checkDrill">Check answers</button>';
+    if (!p.checked) return p.blankWarn ? '<div class="notice card"><b>' + p.blankWarn + ' questions are still blank</b><div class="grid2"><button class="btn ghost" data-act="keepAnswering">Keep answering</button><button class="btn" data-act="checkAnyway">Check anyway</button></div></div>' : '<button class="btn wide big" data-act="checkDrill">Check answers</button>';
     var tot = allQs(p.data).length, sc = drillScore(p.data), wrong = tot - sc;
     if (p.data.test) { var tm = testMarks(p.data); tot = tm.tot; sc = tm.got; wrong = tot - sc; }
     var h = (p.data.test ? '<div class="bandbig"><b>Band ' + band(rawToBand(p.data.kind, sc, tot)) + '</b><span class="muted">estimated from a typical raw-score conversion · Academic ' + (p.data.kind === "reading" ? "Reading" : "Listening") + '</span></div>' : "") + '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">' + (wrong ? Math.round(100 * sc / Math.max(1, tot)) + '% correct' + ((p.answeredN || tot) > sc ? " · wrong answers saved to your mistake log" : " · blanks are not logged") : "Perfect score!") + '</span></div>';
@@ -1917,6 +1917,8 @@
       loadDrill(testToDrill(t), null); ui.practice.sampleId = t.id;
     },
     setPart: function (el) { var p = ui.practice; stopSay(); p.playing = false; p.part = +el.getAttribute("data-n"); if (!p.checked) p.plays = 0; render(); var t = document.getElementById(p.kind === "reading" ? "rPassage" : "rQuestions") || document.querySelector(".parttabs"); if (t && t.scrollIntoView) t.scrollIntoView({ block: "start" }); },
+    keepAnswering: function () { ui.practice.blankWarn = 0; render(); },
+    checkAnyway: function () { var p = ui.practice; p.blankOk = true; p.blankWarn = 0; ACT.checkDrill(); },
     retryDrill: function () { var p = ui.practice, sid = p.sampleId; loadDrill(p.data, p.bankId); p.sampleId = sid; },
     nextBuiltIn: function () { var x = nextBuiltIn(); if (!x) return; var sid = x.id; loadDrill(x, null); ui.practice.sampleId = sid; },
     closeDrill: function () { var p = ui.practice; p.data = null; stopSay(); render(); window.scrollTo(0, 0); },
@@ -1933,7 +1935,7 @@
       var p = ui.practice, d = p.data, qsAll = allQs(d);
       var answered = qsAll.filter(function (x) { var a = p.answers[x.key]; return Array.isArray(a) ? a.length : (a != null && String(a).trim() !== ""); }).length;
       if (!answered) { toast("Answer at least one question first."); return; }
-      if (answered < qsAll.length && !p.blankOk) { p.blankOk = true; toast((qsAll.length - answered) + " questions are blank. Tap Check again to mark anyway."); return; }
+      if (answered < qsAll.length && !p.blankOk) { p.blankWarn = qsAll.length - answered; render(); var cb = view.querySelector('[data-act="checkAnyway"]'); if (cb && cb.scrollIntoView) cb.scrollIntoView({ block: "center" }); return; }
       p.checked = true; tPause("practice"); stopSay(); p.playing = false;
       var total = 0, sc = 0;
       groupsOf(d).forEach(function (g, gi) {
@@ -2319,7 +2321,7 @@
   view.addEventListener("pointerup", endDrag);
   view.addEventListener("pointercancel", function () { if (drag && drag.wrap) { drag.wrap.style.transform = ""; } drag = null; });
   view.addEventListener("keydown", function (e) {
-    if ((e.key === "Enter") && e.target.id === "flipcard") { e.preventDefault(); flipCard(); }
+    if ((e.key === "Enter" || e.key === " ") && e.target.id === "flipcard") { e.preventDefault(); flipCard(); }
   });
 
   function route() {
