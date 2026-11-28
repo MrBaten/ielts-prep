@@ -2,6 +2,13 @@
   "use strict";
 
   var D = window.IELTS_DATA;
+  (function addExtra() {
+    var X = window.IELTS_X8; if (!X) return;
+    var seen = {}; D.PART1.forEach(function (p) { seen[p.topic.toLowerCase()] = 1; });
+    (X.PART1 || []).forEach(function (p) { if (p && p.topic && p.qs && !seen[p.topic.toLowerCase()]) { D.PART1.push(p); seen[p.topic.toLowerCase()] = 1; } });
+    var cues = {}; D.PART2.forEach(function (p) { cues[p.cue.toLowerCase()] = 1; });
+    (X.PART2 || []).forEach(function (p) { if (p && p.cue && p.say && p.p3 && !cues[p.cue.toLowerCase()]) { D.PART2.push(p); cues[p.cue.toLowerCase()] = 1; } });
+  })();
   var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var TABS = ["today", "cards", "write", "speak", "practice", "progress"];
@@ -1076,8 +1083,8 @@
   if (W4.TYPE_NAMES) Object.assign(D.TYPE_NAMES, W4.TYPE_NAMES);
   if (W4.PLANS) Object.assign(D.PLANS, W4.PLANS);
   var T1ALL = null;
-  function t1All() { if (!T1ALL) T1ALL = D.TASK1.map(function (t) { return { kind: "table", q: t.q, charts: [{ kind: "table", unit: t.unit, cols: t.cols, rows: t.rows }] }; }).concat(W4.TASK1X || []).concat(window.IELTS_T1X || []); return T1ALL; }
-  var T2ALL = D.TASK2.concat(W4.TASK2X || []);
+  function t1All() { if (!T1ALL) T1ALL = D.TASK1.map(function (t) { return { kind: "table", q: t.q, charts: [{ kind: "table", unit: t.unit, cols: t.cols, rows: t.rows }] }; }).concat(W4.TASK1X || []).concat(window.IELTS_T1X || []).concat(((window.IELTS_X8 || {}).TASK1 || []).filter(function (t) { return t && t.q && t.charts && t.charts.length; })); return T1ALL; }
+  var T2ALL = D.TASK2.concat(W4.TASK2X || []).concat(((window.IELTS_X8 || {}).TASK2 || []).filter(function (t) { return t && t.q && D.PLANS[t.type]; }));
   var T2TYPES = [["all", "Any type"], ["opinion", "Opinion (agree or disagree)"], ["discussion", "Discuss both views"], ["advdis", "Advantages vs disadvantages"], ["posneg", "Positive or negative development"], ["problem", "Problem and solution / causes"], ["twopart", "Two-part (direct) question"]];
   function t1List() { var k = ui.write.t1kind || "all"; var l = t1All().filter(function (t) { return k === "all" || t.kind === k; }); return l.length ? l : t1All(); }
   function t2List() { var k = ui.write.t2type || "all"; var l = T2ALL.filter(function (t) { return k === "all" || t.type === k; }); return l.length ? l : T2ALL; }
