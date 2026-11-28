@@ -558,23 +558,62 @@
   }
   if ("speechSynthesis" in window) { checkVoices(); try { speechSynthesis.addEventListener("voiceschanged", function () { var before = voiceOK; checkVoices(); if (before !== voiceOK) render(); }); } catch (e) {} setTimeout(function () { if (voiceOK === null) { voiceOK = false; render(); } }, 2500); }
   function canSay() { return !ttsOff && (!!TTS || (("speechSynthesis" in window) && voiceOK !== false)); }
-  function sayFallback(text, rate, pitch) {
+  // ---- clear speech: pick the best English voice, never distort pitch, speak sentence by sentence ----
+  var NOVELTY = /espeak|compact|novelty|albert|bad news|bahh|bells|boing|bubbles|cellos|deranged|good news|hysterical|jester|organ|pipe|superstar|trinoids|whisper|wobble|zarvox|fred|junior|ralph|kathy|grandma|grandpa|eddy|flo|reed|rocko|sandy|shelley/i;
+  function voiceScore(v) {
+    var n = v.name || "", l = (v.lang || "").replace("_", "-"), sc = 0;
+    if (!/^en/i.test(l)) return -999;
+    if (NOVELTY.test(n)) sc -= 80;
+    if (/natural|neural|enhanced|premium|wavenet|studio|journey|siri/i.test(n)) sc += 45;
+    if (/google/i.test(n)) sc += 30;
+    if (/microsoft.*online/i.test(n)) sc += 35;
+    if (/daniel|serena|kate|oliver|arthur|martha|libby|sonia|ryan|samantha|karen|moira|tessa|aria|jenny|guy|natasha|william/i.test(n)) sc += 12;
+    sc += /en-GB/i.test(l) ? 15 : /en-US/i.test(l) ? 12 : /en-(AU|IE|NZ|CA)/i.test(l) ? 9 : 5;
+    if (!v.localService && !navigator.onLine) sc -= 200; // online voices fail offline
+    if (v.localService) sc += 3;
+    return sc;
+  }
+  function englishVoices() {
+    var vs = []; try { vs = speechSynthesis.getVoices(); } catch (e) {}
+    return vs.filter(function (v) { return voiceScore(v) > -100; }).sort(function (a, b) { return voiceScore(b) - voiceScore(a); });
+  }
+  function pickVoice(k) {
+    var list = englishVoices(), name = settings().voiceName;
+    if (name && !k) { var chosen = list.filter(function (v) { return v.name === name; })[0]; if (chosen) return chosen; }
+    if (k) { // a different, still good voice for each listening speaker
+      var good = list.filter(function (v) { return voiceScore(v) >= voiceScore(list[0]) - 40; });
+      if (name) { var c0 = list.filter(function (v) { return v.name === name; })[0]; if (c0) good = [c0].concat(good.filter(function (v) { return v !== c0; })); }
+      return good[k % Math.max(1, good.length)] || list[0];
+    }
+    return list[0];
+  }
+  function speechRate(r) { return Math.max(0.6, Math.min(1.3, (r || 1) * (+settings().voiceRate || 0.95))); }
+  function chunks(text) {
+    var parts = String(text).replace(/\s+/g, " ").trim().match(/[^.!?;:]+[.!?;:]*["”’)]?\s*/g) || [String(text)], out = [], cur = "";
+    parts.forEach(function (p) { if ((cur + p).length > 180 && cur) { out.push(cur.trim()); cur = p; } else cur += p; });
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+  function sayFallback(text, rate, speakerIdx) {
     return new Promise(function (res, rej) {
       if (!("speechSynthesis" in window)) return rej({ code: "unavailable" });
-      var u = new SpeechSynthesisUtterance(text);
-      u.lang = "en-GB"; u.rate = rate || 1; u.pitch = pitch || 1;
-      var vs = speechSynthesis.getVoices();
-      var v = vs.filter(function (x) { return /en-GB/i.test(x.lang); })[0] || vs.filter(function (x) { return /^en/i.test(x.lang); })[0];
-      if (v) u.voice = v;
-      u.onend = function () { res(); };
-      u.onerror = function () { res(); };
-      speechSynthesis.speak(u);
+      var list = chunks(text), i = 0, v = pickVoice(speakerIdx || 0), myRun = ++sayRun;
+      var single = englishVoices().length < 2 && speakerIdx;
+      (function next() {
+        if (myRun !== sayRun || i >= list.length) return res();
+        var u = new SpeechSynthesisUtterance(list[i++]);
+        u.lang = v ? v.lang : "en-GB"; if (v) u.voice = v;
+        u.rate = speechRate(rate); u.pitch = single ? [1, 0.94, 1.06, 0.97][speakerIdx % 4] : 1; u.volume = 1;
+        u.onend = next; u.onerror = function () { next(); };
+        speechSynthesis.speak(u);
+      })();
     });
   }
+  var sayRun = 0;
   function say(text, rate) {
     if (ttsOff) return Promise.resolve();
     if (TTS) {
-      return TTS.speak(String(text).slice(0, 1900), { language: "en-GB", rate: rate || 1 }).catch(function (e) {
+      return TTS.speak(String(text).slice(0, 1900), { language: "en-GB", rate: speechRate(rate) }).catch(function (e) {
         if (e && e.code === "not_granted") { ttsOff = true; render(); }
         else if (e && e.code !== "stopped") toast("Couldn't play audio right now.");
       });
@@ -583,6 +622,7 @@
     return sayFallback(text, rate);
   }
   function stopSay() {
+    sayRun++;
     if (TTS) TTS.stop().catch(function () {});
     try { speechSynthesis.cancel(); } catch (e) {}
   }
@@ -1644,6 +1684,13 @@
     h += '<label class="field">Exam date<input type="date" data-ch="set_exam" value="' + esc(st.exam) + '"></label>';
     h += '<label class="field">Target band<select data-ch="set_target">' + [6, 6.5, 7, 7.5, 8].map(function (b) { return '<option value="' + b + '"' + (+st.target === b ? " selected" : "") + '>' + band(b) + '</option>'; }).join("") + '</select></label>';
     h += '<label class="field">Stretch goal<select data-ch="set_stretch">' + [6.5, 7, 7.5, 8, 8.5].map(function (b) { return '<option value="' + b + '"' + (+st.stretch === b ? " selected" : "") + '>' + band(b) + '</option>'; }).join("") + '</select></label>';
+    if (!TTS && "speechSynthesis" in window) {
+      var evs = englishVoices();
+      h += '<label class="field">Voice<select data-ch="set_voice"><option value="">Automatic: clearest available' + (evs[0] ? " (" + esc(evs[0].name) + ")" : "") + '</option>' + evs.slice(0, 25).map(function (v) { return '<option value="' + esc(v.name) + '"' + (st.voiceName === v.name ? " selected" : "") + '>' + esc(v.name) + ' · ' + esc(v.lang) + (v.localService ? "" : " · online") + '</option>'; }).join("") + '</select></label>';
+    }
+    h += '<label class="field">Speaking speed<select data-ch="set_rate">' + [[0.8, "Slow"], [0.9, "A little slow"], [0.95, "Clear (default)"], [1, "Normal"], [1.1, "Fast (test speed)"]].map(function (o) { return '<option value="' + o[0] + '"' + ((+st.voiceRate || 0.95) === o[0] ? " selected" : "") + '>' + o[1] + '</option>'; }).join("") + '</select></label>';
+    h += '<button class="btn ghost small" data-act="testVoice">▶ Test the voice</button>';
+    if (!TTS) h += '<details><summary class="textbtn">Get a clearer voice on your phone</summary><p class="note"><b>Android:</b> Settings → Accessibility (or System → Languages) → Text-to-speech output → Speech Services by Google → ⚙ → Install voice data → English (United Kingdom) → pick a voice and download it. Then choose it above.</p><p class="note"><b>iPhone/iPad:</b> Settings → Accessibility → Spoken Content → Voices → English → download an “Enhanced” or “Premium” voice (e.g. Serena or Daniel).</p><p class="note"><b>Windows/Chrome desktop:</b> voices marked “Online (Natural)” or “Google UK English” are the clearest when you have internet.</p></details>';
     h += '<label class="field">Cards per review session<select data-ch="set_sess">' + [5, 8, 10, 12, 15].map(function (b) { return '<option value="' + b + '"' + (sessSize() === b ? " selected" : "") + '>' + b + '</option>'; }).join("") + '</select></label>';
     h += '<label class="field">Example sentences<select data-ch="set_exl">' + [["both", "Basic and advanced"], ["b", "Basic only"], ["a", "Advanced only"]].map(function (o) { return '<option value="' + o[0] + '"' + ((st.exLevel || "both") === o[0] ? " selected" : "") + '>' + o[1] + '</option>'; }).join("") + '</select></label>';
     h += '<label class="field">New flashcards per day<select data-ch="set_new">' + [5, 10, 15, 20, 30].map(function (b) { return '<option value="' + b + '"' + (+st.newPerDay === b ? " selected" : "") + '>' + b + '</option>'; }).join("") + '</select></label></div><p class="note">After the exam date, the Today routine switches to application tasks.</p></section>';
@@ -1720,6 +1767,7 @@
         return startSession(shuffle(ids));
       }
     },
+    testVoice: function () { say("Hello. This is how your listening practice will sound. The meeting has been moved to the fourteenth of March."); },
     sessSize: function (el) { setSettings({ session: +el.getAttribute("data-v") }); render(); },
     moreEx: function () { ui.cards.session.more = true; var sc = view.querySelector(".face.back"); var top = sc ? sc.scrollTop : 0; render(); var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
     exLevel: function (el) { var sc = view.querySelector(".face.back"), top = sc ? sc.scrollTop : 0; ui.noAnim = true; setSettings({ exLevel: el.getAttribute("data-v") }); render(); ui.noAnim = false; var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
@@ -1764,7 +1812,7 @@
       } catch (e) { aiFail(e); }
     },
     spellSay: function () { var sp = ui.cards.spell; say(cardById(sp.items[sp.i]).w); },
-    spellSaySlow: function () { var sp = ui.cards.spell; say(cardById(sp.items[sp.i]).w, 0.7); },
+    spellSaySlow: function () { var sp = ui.cards.spell; say(cardById(sp.items[sp.i]).w, 0.75); },
     spellCheck: function () { spellCheck(); },
     spellNext: function () {
       var sp = ui.cards.spell; if (sp.i + 1 >= sp.items.length) logVocabDrill(sp.items.length); sp.i++; sp.input = ""; sp.result = null; render();
@@ -2086,11 +2134,11 @@
         });
       } else {
         try { speechSynthesis.cancel(); } catch (e) {}
-        var i = 0, pitches = [1, 1.25, 0.85, 1.1];
+        var i = 0;
         (function nextLine() {
           if (!p.playing || i >= lines.length) return done();
           var l = lines[i++];
-          sayFallback(l.text, 0.95, pitches[speakers.indexOf(l.speaker) % 4]).then(nextLine);
+          sayFallback(l.text, 1, speakers.indexOf(l.speaker) % 4).then(function () { setTimeout(nextLine, 250); });
         })();
       }
     },
@@ -2363,6 +2411,8 @@
     else if (k === "set_target") { setSettings({ target: +v }); render(); }
     else if (k === "set_stretch") { setSettings({ stretch: +v }); render(); }
     else if (k === "set_new") { setSettings({ newPerDay: +v }); render(); }
+    else if (k === "set_voice") { setSettings({ voiceName: v }); ACT.testVoice(); }
+    else if (k === "set_rate") { setSettings({ voiceRate: +v }); ACT.testVoice(); }
     else if (k === "set_sess") { setSettings({ session: +v }); render(); }
     else if (k === "set_exl") { setSettings({ exLevel: v }); render(); }
   });
