@@ -174,7 +174,7 @@ window.IELTS_DATA4 = {
           outline: { style: "table", rows: [["Period", "How the marsh was seen", "What was done"], ["Past centuries", "as [1]", "drained for [2] land"], ["After the 1990s storms", "as protection", "about [3] hectares restored"]] },
           questions: [
             { q: "Gap 1", answer: "wasteland", explanation: "A: saw the marsh as wasteland." },
-            { q: "Gap 2", answer: "grazing", alt: ["sheep"], explanation: "A: grazing land for sheep." },
+            { q: "Gap 2", answer: "grazing", explanation: "A: grazing land for sheep." },
             { q: "Gap 3", answer: "300", alt: ["three hundred"], explanation: "C: around 300 hectares." }
           ] }
       ] },
@@ -244,7 +244,7 @@ window.IELTS_DATA4 = {
           ] },
         { type: "lmcq2", instructions: "Choose TWO letters, A–E.",
           questions: [
-            { q: "Which TWO things are not allowed in the park?", options: ["A cycling on the main paths", "B feeding the ducks", "C barbecues", "D dogs off the lead", "E picnics"], answer: ["B", "C"], explanation: "Dogs can be off the lead except near the lake; picnics and cycling are allowed." }
+            { q: "Which TWO things are not allowed in the park?", options: ["A cycling on the main paths", "B feeding the ducks", "C barbecues", "D dogs off the lead in the open areas", "E picnics"], answer: ["B", "C"], explanation: "Dogs can be off the lead except near the lake; picnics and cycling are allowed." }
           ] }
       ] },
     { id: "sl3", kind: "listening", type: "Built-in Section 3", title: "Planning a group survey",
@@ -267,7 +267,7 @@ window.IELTS_DATA4 = {
           outline: { style: "table", rows: [["Method", "Number of people", "Main problem"], ["Online questionnaire", "[1]", "answers may not be [2]"], ["Interviews", "[3]", "slow to type up"], ["Sleep [4]", "about 20", "people may [5] to complete it"]] },
           questions: [
             { q: "Gap 1", answer: "150", alt: ["one hundred and fifty", "a hundred and fifty"], explanation: "Aisha suggests 200, but they agree on 150." },
-            { q: "Gap 2", answer: "honest", alt: ["honestly"], explanation: "People don’t always answer honestly online." },
+            { q: "Gap 2", answer: "honest", explanation: "People don’t always answer honestly online." },
             { q: "Gap 3", answer: "12", alt: ["twelve"], explanation: "Tom says ten; Aisha changes it to twelve." },
             { q: "Gap 4", answer: "diary", explanation: "A sleep diary for a week." },
             { q: "Gap 5", answer: "forget", explanation: "Some will forget to fill it in." }

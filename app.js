@@ -192,13 +192,18 @@
     T.mine = D.TOPICS.mine || "My words";
     D.TOPICS = T;
   })();
-  function guessK(s) { return String(s).split(/\s+/).length >= 17 ? "a" : "b"; }
+  function guessK(s) {
+    var w = String(s).split(/\s+/).length;
+    if (w >= 17) return "a";
+    if (w >= 12 && /\b(although|whereas|which|whom|whose|despite|thereby|hence|consequently|nevertheless|notwithstanding|provided that|in order to|is likely to|tend to|arguably|it is (widely|often|generally))\b/i.test(s)) return "a";
+    return "b";
+  }
   function exsOf(c) { return [c.ex, c.ex2, c.ex3].filter(function (x) { return x && String(x).trim(); }); }
   function preCards() {
     if (!PRE) {
       PRE = D.CARDS.map(function (a) {
         var e = EX[a[0]] || [], up = EX2[a[0]] || {}, base = [a[4], e[1], e[2]].filter(Boolean);
-        var sents = base.map(function (s, i) { return { s: s, k: (up.t && up.t[i]) || guessK(s) }; }).concat((up.adv || []).map(function (s) { return { s: s, k: "a" }; }));
+        var sents = base.map(function (s) { return { s: s, k: guessK(s) }; }).concat((up.adv || []).map(function (s) { return { s: s, k: "a" }; }));
         return { id: a[0], w: a[1], pos: a[2], def: a[3], ex: a[4], bn: a[5], topic: a[6], pre: true, lvl: e[0] || "B2", sents: sents };
       }).concat(NEWW.map(function (a) {
         return { id: a[0], w: a[1], pos: a[2], def: a[3], bn: a[4], topic: a[5], lvl: a[6], pre: true, ex: a[7][0], sents: a[7].map(function (s) { return { s: s, k: "b" }; }).concat(a[8].map(function (s) { return { s: s, k: "a" }; })) };
@@ -215,8 +220,9 @@
     var f = all.filter(function (x) { return x.k === want; });
     return f.length ? f : all;
   }
-  function sentList(c, highlight) {
-    return '<ol class="exlist">' + sentsFor(c).map(function (x) { return '<li><span class="sk ' + x.k + '">' + (x.k === "a" ? "Advanced" : "Basic") + '</span><span>' + (highlight ? highlightWord(x.s, c.w) : esc(x.s)) + '</span>' + speakBtn(x.s) + '</li>'; }).join("") + '</ol>';
+  function sentList(c, highlight, max) {
+    var list = sentsFor(c); if (max) list = list.slice(0, max);
+    return '<ol class="exlist">' + list.map(function (x) { return '<li><span class="sk ' + x.k + '">' + (x.k === "a" ? "Advanced" : "Basic") + '</span><span>' + (highlight ? highlightWord(x.s, c.w) : esc(x.s)) + '</span>' + speakBtn(x.s) + '</li>'; }).join("") + '</ol>';
   }
   function sentToggle() {
     var v = settings().exLevel || "both";
@@ -365,7 +371,8 @@
   function loadDrill(d, bankId) {
     var p = ui.practice; stopSay();
     p.data = d; p.kind = d.kind; p.bankId = bankId; p.sampleId = null; p.answers = {}; p.checked = false; p.plays = 0; p.playing = false; p.script = false; p.blankOk = false; p.heard = false;
-    if (p.kind === "reading") { tSet("practice", 1200, "down"); tStart("practice"); } else tSet("practice", 0, "up");
+    p.part = 0;
+    if (p.kind === "reading") { tSet("practice", d.parts ? 3600 : 1200, "down"); tStart("practice"); } else tSet("practice", 0, "up");
     render();
     setTimeout(function () { var el = document.querySelector(".passage") || document.querySelector(".qgroup"); if (el && el.scrollIntoView) el.closest("section").scrollIntoView({ behavior: "smooth", block: "start" }); }, 30);
   }
@@ -591,11 +598,17 @@
     var els = document.querySelectorAll("[data-timer]");
     for (var i = 0; i < els.length; i++) {
       var n = els[i].getAttribute("data-timer");
-      els[i].textContent = tText(n); els[i].className = tClass(n);
+      els[i].textContent = tText(n); els[i].className = tClass(n) + (els[i].getAttribute("data-cls") ? " " + els[i].getAttribute("data-cls") : "");
     }
   }
   setInterval(function () {
     paintTimers();
+    var tp = T.practice;
+    if (tp && tp.mode === "down" && tp.running) {
+      var lf = tLeft("practice");
+      if (lf <= 300 && lf > 0 && !tp.warned) { tp.warned = true; toast("5 minutes left."); }
+      if (lf <= 0 && !tp.ended) { tp.ended = true; toast("Time is up. Finish your answer and check."); try { navigator.vibrate && navigator.vibrate(200); } catch (e) {} }
+    }
     // speaking part 2 flow: prep -> talk -> done
     if (ui.speak.phase === "prep" && tLeft("speak") <= 0) {
       ui.speak.phase = "talk"; tSet("speak", 120, "down"); tStart("speak");
@@ -654,7 +667,7 @@
     for (var i = 0; i < links.length; i++) {
       if (links[i].getAttribute("data-tab") === ui.tab) links[i].setAttribute("aria-current", "page"); else links[i].removeAttribute("aria-current");
     }
-    var due = dueCount("all"), b = $("dueBadge");
+    var due = dueCount(), b = $("dueBadge");
     b.hidden = !due; b.textContent = due > 99 ? "99+" : due;
     var fn = { today: viewToday, cards: viewCards, write: viewWrite, speak: viewSpeak, practice: viewPractice, progress: viewProgress }[ui.tab];
     view.innerHTML = fn();
@@ -673,7 +686,7 @@
   // ---------------- TODAY ----------------
   function viewToday() {
     var t = today(), k = ui.sel, r = dayRec(k), list = tasksFor(k, r.type), s = scoreOf(k);
-    var due = dueCount("all"), weak = weakest(), st = settings();
+    var due = dueCount(), weak = weakest(), st = settings();
     var sr = srs(), reviews7 = 0;
     for (var i = 0; i < 7; i++) reviews7 += sr.log[addDays(t, -i)] || 0;
     var wk = addDays(t, -6);
@@ -762,15 +775,15 @@
     filterCards({ deck: c.deck }).forEach(function (x) { lc.all++; lc[lvlGroup(x.lvl)]++; });
     var dc = { all: 0 };
     filterCards({ level: c.level }).forEach(function (x) { dc.all++; dc[x.topic] = (dc[x.topic] || 0) + 1; });
-    var h = '<section class="card filters"><div class="lvlseg" role="group" aria-label="Level">' + LEVELS.map(function (l) { return '<button data-act="setLevel" data-v="' + l[0] + '" aria-pressed="' + (c.level === l[0]) + '"><b>' + { all: "All", basic: "Basic", inter: "Intermediate", adv: "Advanced" }[l[0]] + '</b><span>' + { all: "", basic: "A2–B1 · ", inter: "B2 · ", adv: "C1–C2 · " }[l[0]] + lc[l[0]] + '</span></button>'; }).join("") + '</div>';
-    h += '<label class="field">Deck<select data-ch="deck2">' + [["all", "All decks"]].concat(Object.keys(D.TOPICS).map(function (k) { return [k, D.TOPICS[k]]; })).filter(function (d) { return d[0] === "all" || d[0] === "mine" || dc[d[0]] || c.deck === d[0]; }).map(function (d) { return '<option value="' + d[0] + '"' + (c.deck === d[0] ? " selected" : "") + '>' + esc(d[1]) + ' (' + (dc[d[0]] || 0) + ')</option>'; }).join("") + '</select></label></section>';
+    var h = '<section class="card filters"><div class="lvlseg" role="group" aria-label="Level">' + LEVELS.map(function (l) { return '<button data-act="setLevel" data-v="' + l[0] + '" aria-pressed="' + (c.level === l[0]) + '"><b>' + { all: "All", basic: "Basic", inter: "Inter\u00admediate", adv: "Advanced" }[l[0]] + '</b><span>' + { all: "", basic: "A2–B1 · ", inter: "B2 · ", adv: "C1–C2 · " }[l[0]] + lc[l[0]] + '</span></button>'; }).join("") + '</div>';
+    h += '<label class="field">Deck<select data-ch="deck2">' + [["all", "All decks"]].concat(Object.keys(D.TOPICS).map(function (k) { return [k, D.TOPICS[k]]; })).filter(function (d) { return d[0] === "all" || d[0] === "mine" || dc[d[0]] || c.deck === d[0]; }).map(function (d) { var n0 = dc[d[0]] || 0, tiny = d[0] !== "all" && d[0] !== "mine" && n0 < 6 && c.deck !== d[0]; return '<option value="' + d[0] + '"' + (c.deck === d[0] ? " selected" : "") + (tiny ? " disabled" : "") + '>' + esc(d[1]) + ' (' + n0 + (tiny ? " · too few at this level" : "") + ')</option>'; }).join("") + '</select></label></section>';
     h += '<section class="card hero"><div class="row between"><div><div class="hero-num num">' + q + '</div><div class="note">' + (q ? "cards ready · " + counts.due + " due, " + fresh + " new" : (counts["new"] && !newLeft() ? "Today’s " + settings().newPerDay + " new words are done." : "All caught up. Try a drill below.")) + '</div></div><div class="streakbox"><b class="num">' + (s.log[today()] || 0) + '</b><span>reviewed today</span></div></div>';
     h += '<div class="stack" aria-hidden="true"><i class="m" style="width:' + (counts.mastered / total * 100) + '%"></i><i class="l" style="width:' + ((counts.learning + counts.review) / total * 100) + '%"></i></div>';
     h += '<div class="legend"><span><i class="f"></i>Mastered ' + counts.mastered + '</span><span><i class="p"></i>Learnt or learning ' + (counts.learning + counts.review) + '</span><span><i></i>Not started ' + counts["new"] + '</span></div>';
     if (q) h += '<button class="btn big wide" data-act="startReview">Start review · ' + n + ' cards · ~' + estMin(n) + ' min</button>';
     else if (counts["new"] && !newLeft()) h += '<button class="btn big wide" data-act="moreNew">Learn ' + Math.min(10, counts["new"]) + ' more words now</button>';
     else h += '<button class="btn big wide" disabled>Nothing due right now</button>';
-    h += '<div class="row between"><span class="note">Cards per session</span><div class="seg small" role="group" aria-label="Cards per session">' + [5, 10, 15].map(function (k) { return '<button data-act="sessSize" data-v="' + k + '" aria-pressed="' + (sessSize() === k) + '">' + k + '</button>'; }).join("") + '</div></div></section>';
+    h += '<div class="row between"><span class="note">Cards per session</span><div class="seg small" role="group" aria-label="Cards per session">' + [5, 10, 15].concat([5, 10, 15].indexOf(sessSize()) === -1 ? [sessSize()] : []).sort(function (a, b) { return a - b; }).map(function (k) { return '<button data-act="sessSize" data-v="' + k + '" aria-pressed="' + (sessSize() === k) + '">' + k + '</button>'; }).join("") + '</div></div></section>';
 
     h += '<div class="modes">';
     h += modeTile("cloze", "Gap-fill", "Recall the word inside a real sentence: the most effective drill", "✎");
@@ -784,6 +797,13 @@
   }
   function modeTile(m, title, sub, mark) {
     return '<button class="mode" data-act="mode" data-m="' + m + '"><span class="mark" aria-hidden="true">' + mark + '</span><b>' + esc(title) + '</b><span>' + esc(sub) + '</span></button>';
+  }
+  function rowBody(id) {
+    var x = cardById(id); if (!x) return "";
+    var st = srs().cards[id];
+    var h = '<div>' + esc(x.def) + '</div>' + (x.bn ? '<div class="bn small">বাংলা: ' + esc(x.bn) + '</div>' : "") + sentList(x, false);
+    h += '<div class="row">' + speakBtn(x.w) + '<span class="note grow rowstat">' + (st ? (st.due > Date.now() ? "Next review " + short(keyOf(new Date(st.due))) : "Due now") + ((st.lapses || 0) ? " · forgotten " + st.lapses + "×" : "") : "") + '</span><button class="btn ghost small" data-act="cardNow" data-id="' + x.id + '">Review soon</button>' + (x.pre ? "" : '<button class="btn danger small" data-act="cardDel" data-id="' + x.id + '">Delete</button>') + '</div>' + confirmBlock("card:" + x.id, "Delete this card and its progress?");
+    return h;
   }
   function browseFilter() { var b = ui.cards.b; return { deck: b.deck, level: b.level, status: b.status, pos: b.pos, q: ui.cards.search }; }
   function viewBrowse() {
@@ -802,17 +822,14 @@
     }
     h += '</section>';
 
-    var limit = c.showAll ? shown.length : 40;
-    h += '<section class="card"><div class="wordlist">';
+    var limit = c.showN || 40;
+    h += '<section class="card"><div class="wordlist" id="wordlist">';
     shown.slice(0, limit).forEach(function (x) {
       var st = s.cards[x.id], lv = level(st);
-      h += '<details><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="cefr">' + esc(x.lvl) + '</span><span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></summary><div class="body"><div>' + esc(x.def) + '</div>';
-      h += sentList(x, false);
-      if (x.bn) h += '<details><summary class="small muted">বাংলা অর্থ দেখুন</summary><div class="bn">' + esc(x.bn) + '</div></details>';
-      h += '<div class="row">' + speakBtn(x.w) + (st ? '<span class="note">' + (st.due > Date.now() ? "Next review " + short(keyOf(new Date(st.due))) : "Due now") + ((st.lapses || 0) ? " · forgotten " + st.lapses + "×" : "") + '</span>' : "") + '<span class="grow"></span><button class="btn ghost small" data-act="cardNow" data-id="' + x.id + '">Review soon</button>' + (x.pre ? "" : '<button class="btn danger small" data-act="cardDel" data-id="' + x.id + '">Delete</button>') + '</div>' + confirmBlock("card:" + x.id, "Delete this card and its progress?") + '</div></details>';
+      h += '<details data-card="' + esc(x.id) + '"><summary>' + esc(x.w) + ' <span class="muted small">' + esc(x.pos || "") + '</span><span class="cefr">' + esc(x.lvl) + '</span><span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></summary><div class="body"></div></details>';
     });
     if (!shown.length) h += '<p class="empty">No words match these filters.</p>';
-    h += '</div>' + (shown.length > limit ? '<button class="btn ghost" data-act="showAllCards">Show all ' + shown.length + '</button>' : "") + '</section>';
+    h += '</div>' + (shown.length > limit ? '<button class="btn ghost wide" data-act="showMoreCards">Show ' + Math.min(50, shown.length - limit) + ' more (' + (shown.length - limit) + ' left)</button>' : "") + '</section>';
 
     h += '<section class="card"><h2>Add your own word</h2><div class="row"><input type="text" class="grow" placeholder="Word or phrase you met" data-in="add_w" value="' + esc(a.w) + '" aria-label="Word">';
     if (aiReady()) h += '<button class="btn ghost" data-act="addFill"' + (ui.busy ? " disabled" : "") + '>Fill with AI</button>';
@@ -844,8 +861,8 @@
   function viewReview() {
     var sess = ui.cards.session, s = srs();
     if (sess.i >= sess.queue.length) {
-      var acc = sess.done ? Math.round(100 * (sess.done - sess.again) / sess.done) : 0, more = ui.cards.mode === "review" ? buildQueue(ui.cards.deck).length : 0;
-      return '<section class="card hero center"><div class="hero-num">🎉</div><h2>Session complete</h2><div class="tiles"><div class="tile"><b>' + sess.done + '</b><span>cards reviewed</span></div><div class="tile"><b>' + acc + '%</b><span>remembered first time</span></div><div class="tile"><b>' + sess.again + '</b><span>marked Again</span></div></div><div class="grid2">' + (more ? '<button class="btn" data-act="nextBatch">Next ' + Math.min(more, sessSize()) + ' cards</button>' : '<button class="btn" data-act="mode" data-m="cloze">Gap-fill drill</button>') + '<button class="btn ghost" data-act="cardsHome">Done</button></div>' + (more ? '<p class="note center">' + more + ' more cards are ready. Short sessions with breaks help memory.</p>' : "") + '</section>';
+      var firstTot = sess.total || sess.done, acc = firstTot ? Math.round(100 * (firstTot - sess.again) / firstTot) : 0, more = ui.cards.mode === "review" ? buildQueue(ui.cards.deck).length : 0;
+      return '<section class="card hero center"><div class="hero-num">🎉</div><h2>Session complete</h2><div class="tiles"><div class="tile"><b>' + firstTot + '</b><span>cards reviewed' + (sess.done > firstTot ? " (+" + (sess.done - firstTot) + " repeat)" : "") + '</span></div><div class="tile"><b>' + acc + '%</b><span>remembered first time</span></div><div class="tile"><b>' + sess.again + '</b><span>marked Again</span></div></div><div class="grid2">' + (more ? '<button class="btn" data-act="nextBatch">Next ' + Math.min(more, sessSize()) + ' cards</button>' : '<button class="btn" data-act="mode" data-m="cloze">Gap-fill drill</button>') + '<button class="btn ghost" data-act="cardsHome">Done</button></div>' + (more ? '<p class="note center">' + more + ' more cards are ready. Short sessions with breaks help memory.</p>' : "") + '</section>';
     }
     var id = sess.queue[sess.i], x = cardById(id);
     if (!x) { sess.i++; return viewReview(); }
@@ -853,12 +870,13 @@
     var autoBtn = '<button class="iconbtn' + (autoPlay ? " on" : "") + '" data-act="toggleAuto" aria-pressed="' + autoPlay + '" aria-label="Auto-play pronunciation">' + ICON.sound + '</button>';
     var tot = sess.total || sess.queue.length, extra = sess.queue.length - tot;
     var h = '<section class="card session">' + sessHead("cardsHome", Math.min(sess.i, tot), tot, (extra > 0 ? '<span class="chip quiet" title="Cards you marked Again come back once">' + (sess.i >= tot ? "repeat " + (sess.i - tot + 1) + "/" + extra : "+" + extra + " again") + '</span>' : "") + (canSay() ? autoBtn : ""));
-    h += '<div class="flipwrap" id="flipwrap"><div class="swipe-tag again" id="tagAgain">Again</div><div class="swipe-tag good" id="tagGood">Good</div>';
+    h += '<div class="flipwrap' + (ui.noAnim ? " noanim" : "") + '" id="flipwrap"><div class="swipe-tag again" id="tagAgain">Again</div><div class="swipe-tag good" id="tagGood">Good</div>';
     h += '<div class="flipcard' + (sess.revealed ? " flipped" : "") + '" id="flipcard" tabindex="0" role="button" aria-label="Flashcard: ' + esc(x.w) + '. Tap to flip.">';
     h += '<div class="face front"><div class="row between full"><span class="chip quiet">' + esc(D.TOPICS[x.topic] || "") + '</span><span><span class="cefr">' + esc(x.lvl) + '</span> <span class="lvl ' + lv + '">' + (lv === "review" ? "learnt" : lv) + '</span></span></div><div class="word">' + esc(x.w) + '</div><div class="pos">' + esc(x.pos || "") + ' · ' + esc(lvlName(x.lvl)) + '</div>' + speakBtn(x.w) + '<div class="hint">Do you know it? Say the meaning, then tap.</div></div>';
     h += '<div class="face back"><div class="row"><div class="word sm grow">' + esc(x.w) + '</div>' + speakBtn(x.w) + '</div><div class="def">' + esc(x.def) + '</div>';
-    h += '<div class="row between"><span class="note">Examples</span>' + sentToggle() + '</div>' + sentList(x, true);
     if (x.bn) h += sess.bn ? '<div class="bn">' + esc(x.bn) + '</div>' : '<button class="textbtn" data-act="showBn">বাংলা অর্থ দেখুন</button>';
+    h += '<div class="row between"><span class="note">Examples</span>' + sentToggle() + '</div>' + sentList(x, true, sess.more ? 0 : 3);
+    if (!sess.more && sentsFor(x).length > 3) h += '<button class="textbtn" data-act="moreEx">+' + (sentsFor(x).length - 3) + ' more examples</button>';
     h += '</div></div></div><div id="sessControls" class="controls">' + reviewControls() + '</div></section>';
     return h;
   }
@@ -966,10 +984,11 @@
   var W4 = window.IELTS_DATA4 || {};
   if (W4.TYPE_NAMES) Object.assign(D.TYPE_NAMES, W4.TYPE_NAMES);
   if (W4.PLANS) Object.assign(D.PLANS, W4.PLANS);
-  var T1ALL = D.TASK1.map(function (t) { return { kind: "table", q: t.q, charts: [{ kind: "table", unit: t.unit, cols: t.cols, rows: t.rows }] }; }).concat(W4.TASK1X || []).concat(window.IELTS_T1X || []);
+  var T1ALL = null;
+  function t1All() { if (!T1ALL) T1ALL = D.TASK1.map(function (t) { return { kind: "table", q: t.q, charts: [{ kind: "table", unit: t.unit, cols: t.cols, rows: t.rows }] }; }).concat(W4.TASK1X || []).concat(window.IELTS_T1X || []); return T1ALL; }
   var T2ALL = D.TASK2.concat(W4.TASK2X || []);
   var T2TYPES = [["all", "Any type"], ["opinion", "Opinion (agree or disagree)"], ["discussion", "Discuss both views"], ["advdis", "Advantages vs disadvantages"], ["posneg", "Positive or negative development"], ["problem", "Problem and solution / causes"], ["twopart", "Two-part (direct) question"]];
-  function t1List() { var k = ui.write.t1kind || "all"; var l = T1ALL.filter(function (t) { return k === "all" || t.kind === k; }); return l.length ? l : T1ALL; }
+  function t1List() { var k = ui.write.t1kind || "all"; var l = t1All().filter(function (t) { return k === "all" || t.kind === k; }); return l.length ? l : t1All(); }
   function t2List() { var k = ui.write.t2type || "all"; var l = T2ALL.filter(function (t) { return k === "all" || t.type === k; }); return l.length ? l : T2ALL; }
   function currentWritePrompt() {
     var w = ui.write;
@@ -1100,7 +1119,7 @@
     h += '<textarea class="essay" id="essayBox" data-in="essay" placeholder="Write your answer here. Plan for 3–5 minutes first." aria-label="Your answer">' + esc(w.text) + '</textarea>';
     h += '<div class="stats" id="essayStats">' + statsHtml(w.text, w.task) + '</div>';
     if (aiReady()) h += '<button class="btn wide" data-act="grade"' + (ui.busy ? " disabled" : "") + '>Mark my answer (AI band estimate)</button>';
-    h += busyBlock("grade") + '<div class="grid2"><button class="btn ghost" data-act="saveEssay">Save without marking</button><button class="btn ghost" data-act="newEssay">Start a new answer</button></div>' + aiNote() + '</section>';
+    h += busyBlock("grade") + '<div class="grid2"><button class="btn ghost" data-act="saveEssay">Save without marking</button><button class="btn ghost" data-act="newEssay">Start a new answer</button></div>' + confirmBlock("essayNew", "Discard this unsaved answer?") + aiNote() + '</section>';
     if (w.result) h += '<section class="card"><h2>Feedback</h2>' + resultHtml(w.result, "essay") + '</section>';
 
     var essays = docsWithPrefix("e_").sort(function (a, b) { return a.date < b.date ? 1 : -1; });
@@ -1128,7 +1147,8 @@
     if (sp.view) {
       var e = get(sp.view);
       if (!e) { sp.view = null; return viewSpeak(); }
-      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeSpeakView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Part ' + e.part + '</span></div><div class="prompt">' + esc(e.prompt) + '</div><div class="model">' + esc(e.text) + '</div>' + (e.result ? resultHtml(e.result, "speakView") : "") + '<button class="btn danger" data-act="delSpeak" data-id="' + esc(sp.view) + '">Delete session</button>' + confirmBlock("speak:" + sp.view, "Delete this session?") + '</section>';
+      if (sp.recFor !== sp.view) { sp.recFor = sp.view; sp.recUrl = null; var vid = sp.view; idb(function (st) { var g = st.get(vid); g.onsuccess = function () { if (g.result && g.result.blob && ui.speak.view === vid) { sp.recUrl = URL.createObjectURL(g.result.blob); render(); } }; }); }
+      return '<section class="card"><div class="row between"><button class="textbtn" data-act="closeSpeakView">← Back</button><span class="note">' + esc(pretty(e.date)) + ' · Part ' + e.part + '</span></div><div class="prompt">' + esc(e.prompt) + '</div>' + (sp.recUrl ? '<audio controls src="' + sp.recUrl + '" style="width:100%"></audio>' : "") + (e.text ? '<div class="model">' + esc(e.text) + '</div>' : "") + (e.result ? resultHtml(e.result, "speakView") : "") + '<button class="btn danger" data-act="delSpeak" data-id="' + esc(sp.view) + '">Delete session</button>' + confirmBlock("speak:" + sp.view, "Delete this session?") + '</section>';
     }
     var h = '<section class="card"><div class="row between"><h2>Speaking</h2></div><div class="seg">';
     [1, 2, 3].forEach(function (n) { h += '<button data-act="sPart" data-n="' + n + '" aria-pressed="' + (sp.part === n) + '">Part ' + n + '<span>' + ["", "4–5 min", "3–4 min", "4–5 min"][n] + '</span></button>'; });
@@ -1158,6 +1178,7 @@
     } else {
       h += '<div class="row between"><span data-timer="speak" class="timer">0:00</span><div class="row"><button class="btn ghost small" data-act="sTimer" data-op="start">Start</button><button class="btn ghost small" data-act="sTimer" data-op="pause">Stop</button><button class="btn ghost small" data-act="sTimer" data-op="reset">Reset</button></div></div>';
     }
+    h += recorderHtml();
     h += '<div class="row between"><b>Your answer</b>' + (DICT ? '<button class="btn ' + (dictState !== "idle" ? "mic on" : "ghost") + ' small" data-act="mic">' + ICON.mic + (dictState !== "idle" ? " Stop dictation" : " Speak to type") + '</button>' : "") + '</div>';
     if (!DICT) h += '<p class="note">Speak out loud, then type what you said. On a phone, tap the microphone on your keyboard to dictate your answer.</p>';
     h += '<div class="partial" id="partial">' + esc(sp.partial) + '</div><textarea rows="7" id="speakText" data-in="speakText" placeholder="Your spoken answer appears here" aria-label="Your spoken answer">' + esc(sp.text) + '</textarea>';
@@ -1174,6 +1195,32 @@
     list.slice(0, 30).forEach(function (e) { h += '<button data-act="viewSpeak" data-id="' + esc(e.id) + '"><span class="chip quiet">P' + e.part + '</span><span class="grow">' + esc(e.prompt) + '</span><b class="num">' + (e.result ? band(e.result.band) : "–") + '</b></button>'; });
     return h + '</div></section>';
   }
+  // ---- voice recorder (MediaRecorder); recordings kept on this device in IndexedDB ----
+  var REC = { state: "idle", url: null, blob: null, secs: 0, err: "", rec: null, chunks: [], t0: 0, timer: null };
+  function canRecord() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
+  function recorderHtml() {
+    var h = '<div class="recbox"><div class="row between"><b>Record yourself</b>';
+    if (!canRecord()) return h + '</div><p class="note">Recording isn’t supported in this browser. Use the offline app in Chrome or Safari.</p></div>';
+    if (REC.state === "recording") h += '<button class="btn danger small" data-act="recStop">■ Stop · <span id="recSecs">' + fmtClock(REC.secs) + '</span></button>';
+    else h += '<button class="btn small" data-act="recStart">● ' + (REC.url ? "Record again" : "Start recording") + '</button>';
+    h += '</div>';
+    if (REC.state === "recording") h += '<p class="note"><span class="recdot"></span>Recording… answer the question out loud.</p>';
+    if (REC.err) h += '<p class="note">' + esc(REC.err) + '</p>';
+    if (REC.url && REC.state !== "recording") {
+      h += '<audio controls src="' + REC.url + '"></audio><div class="row"><span class="note grow">' + fmtClock(REC.secs) + ' recorded' + (ui.speak.part === 2 ? (REC.secs < 90 ? " · aim for 1½–2 minutes" : " · good length") : "") + '</span><a class="btn ghost small" download="speaking-' + today() + '.webm" href="' + REC.url + '">Download</a><button class="btn ghost small" data-act="recDel">Delete</button></div>';
+      h += '<details class="selfcheck"><summary class="textbtn">Listen back: self-check (band descriptors)</summary>' + ["Did I answer the question directly in the first sentence?", "Did I keep talking without long pauses or restarting sentences?", "Did I give reasons and an example, not just a short answer?", "Did I use a few less common words or phrases correctly?", "Did I mix tenses and sentence types (because, although, if)?", "Were my word stress and sounds clear enough to follow easily?"].map(function (q) { return '<label class="choice"><input type="checkbox"><span>' + q + '</span></label>'; }).join("") + '</details>';
+    }
+    return h + '</div>';
+  }
+  function recTick() { var el = $("recSecs"); REC.secs = Math.round((Date.now() - REC.t0) / 1000); if (el) el.textContent = fmtClock(REC.secs); if (ui.speak.part === 2 && REC.secs >= 120) recStop(); }
+  function recStop() { try { if (REC.rec && REC.rec.state !== "inactive") REC.rec.stop(); } catch (e) {} clearInterval(REC.timer); }
+  function idb(fn) {
+    try {
+      var r = indexedDB.open("ielts-rec", 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore("rec"); };
+      r.onsuccess = function () { try { fn(r.result.transaction("rec", "readwrite").objectStore("rec")); } catch (e) {} };
+    } catch (e) {}
+  }
   function speakSecs() { var sp = ui.speak; if (sp.part === 2) return sp.phase === "talk" ? tElapsed("speak") : (sp.secs || 0); return tElapsed("speak"); }
   function speakStatsHtml(s, secs) {
     var wpm = secs > 15 ? Math.round(s.words / (secs / 60)) : null;
@@ -1187,6 +1234,19 @@
     return "Part 2 – " + c.cue + " You should say: " + c.say.join("; ") + "; and explain " + c.explain + ".";
   }
 
+  // practice data (exercise bank, full tests, extra Task 1 prompts) loads after the first screen
+  var lazyState = (window.IELTS_EXBANK && window.IELTS_TESTS) ? "done" : "idle";
+  function ensureLazy() {
+    if (lazyState !== "idle") return;
+    lazyState = "loading";
+    var files = ["data6.js", "data7.js"], left = files.length;
+    files.forEach(function (f) {
+      var sc = document.createElement("script"); sc.src = f; sc.async = true;
+      sc.onload = sc.onerror = function () { if (--left === 0) { lazyState = "done"; T1ALL = null; if (ui.tab === "practice" || ui.tab === "write") render(); } };
+      document.body.appendChild(sc);
+    });
+  }
+  setTimeout(ensureLazy, 600);
   // ---------------- PRACTICE ----------------
   var D4 = window.IELTS_DATA4 || { RQ: [], LQ: [], SAMPLES: [] };
   var LSECTIONS = ["Section 1: an everyday conversation", "Section 2: a talk about a local service or event", "Section 3: students discussing an assignment", "Section 4: a short academic lecture"];
@@ -1213,15 +1273,17 @@
     return list[0] ? list[0].id : "mixed";
   }
   function viewPractice() {
+    if (lazyState !== "done") { ensureLazy(); }
     var p = ui.practice, types = qtypes(p.kind), cur = p.kind === "reading" ? p.rtype : p.ltype;
     var h = '<section class="card"><h2>Reading and Listening drills</h2><div class="seg"><button data-act="pKind" data-k="reading" aria-pressed="' + (p.kind === "reading") + '">Reading</button><button data-act="pKind" data-k="listening" aria-pressed="' + (p.kind === "listening") + '">Listening</button></div>';
     h += '<label class="field">Question type (' + types.length + ' official types)<select data-ch="' + (p.kind === "reading" ? "rtype" : "ltype") + '"><option value="mixed"' + (cur === "mixed" ? " selected" : "") + '>Mixed exam-style set (3 types)</option>' + types.map(function (t) { return '<option value="' + t.id + '"' + (t.id === cur ? " selected" : "") + '>' + esc(t.name) + '</option>'; }).join("") + '</select></label>';
     var tt = qtypeById(p.kind, cur);
     h += '<div class="tipbox"><b>' + esc(tt ? tt.name : "Mixed set") + '</b><span>' + esc(tt ? tt.tip : "Like the real test: one passage or recording with several question types. Read each instruction and word limit carefully.") + '</span></div>';
+    if (lazyState !== "done") h += '<p class="note">Loading exercises…</p>';
     var bankEx = (window.IELTS_EXBANK || []).filter(function (x) { return x.kind === p.kind && (cur === "mixed" || x.qtype === cur); });
     if (cur !== "mixed" && bankEx.length) {
       var scs = get("samplescores") || {};
-      h += '<div class="exgrid" role="list">' + bankEx.map(function (x, i) { var sc = scs[x.id]; return '<button role="listitem" class="exbtn' + (sc ? " done" : "") + '" data-act="openEx" data-id="' + esc(x.id) + '"><b>Exercise ' + (i + 1) + '</b><span>' + esc(x.title) + '</span><span class="chip ' + (sc ? "" : "quiet") + '">' + (sc || (i === 0 ? "easier" : i === bankEx.length - 1 ? "hardest" : "new")) + '</span></button>'; }).join("") + '</div><p class="note">' + bankEx.length + ' built-in exercises for this type, easiest first. They all work offline.</p>';
+      h += '<div class="exgrid" role="list">' + bankEx.map(function (x, i) { var sc = scs[x.id]; var diff = ["easier", "medium", "harder", "hardest"][Math.min(3, Math.round(i * 3 / Math.max(1, bankEx.length - 1)))]; return '<button role="listitem" class="exbtn' + (sc ? " done" : "") + '" data-act="openEx" data-id="' + esc(x.id) + '"><b>Exercise ' + (i + 1) + '</b><span>' + esc(x.title) + '</span><span class="row"><span class="chip quiet">' + diff + '</span>' + (sc ? '<span class="chip">best ' + esc(sc) + '</span>' : "") + '</span></button>'; }).join("") + '</div><p class="note">' + bankEx.length + ' built-in exercises for this type, easiest first. They all work offline.</p>';
     }
     if (p.kind === "listening") h += (aiReady() ? '<label class="field">Section for a new AI drill<select data-ch="lsec">' + LSECTIONS.map(function (t) { return '<option' + (t === p.lsec ? " selected" : "") + '>' + esc(t) + '</option>'; }).join("") + '</select></label>' : "") + '<label class="choice"><input type="checkbox" data-ch="exam"' + (p.exam ? " checked" : "") + '> Exam mode: play the recording once only</label>';
     if (aiReady()) {
@@ -1231,6 +1293,13 @@
     } else h += aiNote();
     h += busyBlock("genDrill") + '</section>';
     if (p.data && p.data.kind === p.kind) h += p.kind === "reading" ? readingHtml() : listeningHtml();
+    var nm = docsWithPrefix("m_").length;
+    if (nm >= 3) h += '<button class="btn ghost wide" data-act="goMistakes">Review my mistakes (' + nm + ')</button>';
+    var tests = (window.IELTS_TESTS || []).filter(function (t) { return t.kind === p.kind; });
+    if (tests.length) {
+      var tsc = get("samplescores") || {};
+      h += '<section class="card"><h2>Full ' + p.kind + ' tests</h2><p class="note">Exam length: ' + (p.kind === "reading" ? "3 passages, 40 questions, 60 minutes" : "4 sections, 40 questions") + ', with an estimated band. Work offline.</p><div class="hist">' + tests.map(function (t) { var sc = tsc[t.id]; return '<button data-act="openTest" data-id="' + esc(t.id) + '"><span class="chip ' + (sc ? "" : "quiet") + '">' + (sc ? esc(sc) : "new") + '</span><span class="grow">' + esc(t.title) + '<span class="note block">' + esc((t.kind === "reading" ? t.passages : t.sections).map(function (x) { return x.title; }).join(" · ")) + '</span></span></button>'; }).join("") + '</div></section>';
+    }
     var samples = D4.SAMPLES.filter(function (s) { return s.kind === p.kind; });
     if (samples.length) {
       h += '<section class="card"><h2>Built-in ' + p.kind + ' sets</h2><p class="note">Always available offline. Together they cover every ' + p.kind + ' question type.</p><div class="hist">';
@@ -1260,8 +1329,11 @@
       return q.answer.every(function (x) { return chosen.some(function (c) { return sameChoice(c, x); }); });
     }
     if (hasChoices) return sameChoice(a, q.answer);
-    var acc = [q.answer].concat(q.alt || []).map(norm);
-    return acc.indexOf(norm(a)) !== -1;
+    var acc = [q.answer].concat(q.alt || []).map(norm), na = norm(a);
+    if (acc.indexOf(na) !== -1) return true;
+    // numbers and phone numbers: ignore spaces
+    var squash = function (x) { return String(x).replace(/[\s-]/g, ""); };
+    return /\d/.test(na) && acc.some(function (x) { return squash(x) === squash(na); });
   }
   function ansLabel(q) { return Array.isArray(q.answer) ? q.answer.join(" and ") : String(q.answer); }
   function inputFor(g, q, key, inline) {
@@ -1315,6 +1387,7 @@
     var p = ui.practice, h = "", base = 0;
     groupsOf(d).forEach(function (g, gi) {
       var qs = g.questions || [], from = base + 1, to = base + qs.length;
+      if (d.parts && g._part !== (p.part || 0)) { base = to; return; }
       h += '<div class="qgroup"><div class="qghead"><b>Questions ' + from + (to > from ? "–" + to : "") + '</b><span class="chip quiet">' + esc(groupTypeName(d, g)) + '</span></div>' + (g.instructions ? '<p class="note">' + esc(g.instructions) + '</p>' : "");
       if (g.map) h += mapHtml(g.map);
       if (g.outline) {
@@ -1338,15 +1411,17 @@
   }
   function readingHtml() {
     var p = ui.practice, d = p.data;
-    var h = '<div class="jumpbar"><button class="btn small ghost" data-act="jumpQ" data-to="rPassage">Passage</button><button class="btn small ghost" data-act="jumpQ" data-to="rQuestions">Questions</button><button class="btn small ghost" data-act="closeDrill" aria-label="Close exercise">✕</button></div>';
-    h += '<div class="readgrid"><section class="card" id="rPassage"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">20:00</span></div><p class="note">You have about 20 minutes per passage in the real test; the timer counts down.</p><div class="passage">';
-    (d.paragraphs || []).forEach(function (pg) { h += '<p><b>' + esc(pg.label) + '</b>' + esc(pg.text) + '</p>'; });
-    h += '</div></section><section class="card" id="rQuestions"><h2>Questions</h2>' + groupsHtml(d) + checkRow() + '</section></div>';
+    var h = '<div class="drill"><div class="jumpbar"><button class="btn small ghost" data-act="jumpQ" data-to="rPassage">Passage</button><button class="btn small ghost" data-act="jumpQ" data-to="rQuestions">Questions</button><span data-timer="practice" data-cls="small jt" class="timer small jt">' + (d.parts ? "60:00" : "20:00") + '</span><button class="btn small ghost" data-act="closeDrill" aria-label="Close exercise">✕</button></div>';
+    var cp = d.parts ? d.parts[p.part || 0] : d;
+    h += '<div class="readgrid"><section class="card" id="rPassage"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">' + (d.parts ? "60:00" : "20:00") + '</span></div>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3><p class="note">The real test gives 60 minutes for all three passages; the timer counts down.</p>' : '<p class="note">You have about 20 minutes per passage in the real test; the timer counts down.</p>') + '<div class="passage">';
+    (cp.paragraphs || []).forEach(function (pg) { h += '<p><b>' + esc(pg.label) + '</b>' + esc(pg.text) + '</p>'; });
+    h += '</div></section><section class="card" id="rQuestions"><h2>Questions</h2>' + groupsHtml(d) + checkRow() + '</section></div></div>';
     return h;
   }
   function listeningHtml() {
     var p = ui.practice, d = p.data;
-    var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div><p class="note">' + esc(d.context || "") + '</p>';
+    var cp = d.parts ? d.parts[p.part || 0] : d;
+    var h = '<section class="card"><div class="row between"><h2>' + esc(d.title) + '</h2><span data-timer="practice" class="timer">0:00</span></div>' + partTabs(d) + (d.parts ? '<h3>' + esc(cp.title || "") + '</h3>' : "") + '<p class="note">' + esc(cp.context || "") + '</p>';
     if (!canSay()) h += '<p class="note">Audio isn’t available here. Read the transcript instead, then answer from memory.</p>';
     else {
       var locked = p.exam && p.plays >= 1 && !p.checked;
@@ -1355,7 +1430,7 @@
     h += '<p class="note">Read all the questions first, as you would in the test. Spelling counts.</p>' + groupsHtml(d) + checkRow();
     if (p.checked || !canSay()) {
       h += '<details' + (p.script ? " open" : "") + '><summary class="textbtn">Show transcript</summary><div class="passage">';
-      (d.lines || []).forEach(function (l) { h += '<p><b>' + esc(l.speaker) + ':</b> ' + esc(l.text) + '</p>'; });
+      curLines(d).forEach(function (l) { h += '<p><b>' + esc(l.speaker) + ':</b> ' + esc(l.text) + '</p>'; });
       h += '</div></details>';
     }
     return h + '</section>';
@@ -1367,12 +1442,43 @@
     }
     return q.q || "";
   }
+  function curLines(d) { return d.parts ? (d.parts[ui.practice.part || 0].lines || []) : (d.lines || []); }
+  function partTabs(d) {
+    if (!d.parts) return "";
+    var p = ui.practice, base = 0;
+    return '<div class="parttabs" role="group" aria-label="' + (d.kind === "reading" ? "Passages" : "Sections") + '">' + d.parts.map(function (pt, i) {
+      var n = groupsOf(d).filter(function (g) { return g._part === i; }).reduce(function (a, g) { return a + (g.questions || []).length; }, 0), from = base + 1; base += n;
+      return '<button data-act="setPart" data-n="' + i + '" aria-pressed="' + ((p.part || 0) === i) + '">' + (d.kind === "reading" ? "Passage " : "Section ") + (i + 1) + '<span>Q' + from + '–' + base + '</span></button>';
+    }).join("") + '</div>';
+  }
+  function testToDrill(t) {
+    var parts = t.kind === "reading" ? t.passages : t.sections, groups = [];
+    parts.forEach(function (pt, i) { (pt.groups || []).forEach(function (g) { var c = Object.assign({}, g); c._part = i; groups.push(c); }); });
+    return { id: t.id, kind: t.kind, title: t.title, test: true, type: "Full test", parts: parts.map(function (pt) { return { title: pt.title, paragraphs: pt.paragraphs, lines: pt.lines, context: pt.context }; }), groups: groups };
+  }
+  // real-test marks: a choose-TWO question is worth 2 marks, one per correct letter
+  function testMarks(d) {
+    var p = ui.practice, got = 0, tot = 0;
+    allQs(d).forEach(function (x) {
+      if (Array.isArray(x.q.answer)) {
+        tot += x.q.answer.length; var ch = Array.isArray(p.answers[x.key]) ? p.answers[x.key] : [];
+        got += Math.min(x.q.answer.length, x.q.answer.filter(function (a) { return ch.some(function (c) { return sameChoice(c, a); }); }).length - Math.max(0, ch.length - x.q.answer.length));
+      } else { tot++; if (answerOk(x.q, p.answers[x.key], x.g)) got++; }
+    });
+    return { got: Math.max(0, got), tot: tot };
+  }
+  function rawToBand(kind, raw, tot) {
+    var r = Math.round(raw * 40 / Math.max(1, tot)), table = kind === "reading" ? D.READING_BANDS : D.LISTENING_BANDS;
+    for (var i = 0; i < table.length; i++) if (r >= table[i][0]) return table[i][1];
+    return r >= 2 ? 2 : 1;
+  }
   function drillScore(d) { var p = ui.practice; return allQs(d).filter(function (x) { return answerOk(x.q, p.answers[x.key], x.g); }).length; }
   function checkRow() {
     var p = ui.practice;
     if (!p.checked) return '<button class="btn wide big" data-act="checkDrill">Check answers</button>';
     var tot = allQs(p.data).length, sc = drillScore(p.data), wrong = tot - sc;
-    var h = '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">' + (wrong ? Math.round(100 * sc / Math.max(1, tot)) + '% correct · answered mistakes saved to your mistake log' : "Perfect score!") + '</span></div>';
+    if (p.data.test) { var tm = testMarks(p.data); tot = tm.tot; sc = tm.got; wrong = tot - sc; }
+    var h = (p.data.test ? '<div class="bandbig"><b>Band ' + band(rawToBand(p.data.kind, sc, tot)) + '</b><span class="muted">estimated from a typical raw-score conversion · Academic ' + (p.data.kind === "reading" ? "Reading" : "Listening") + '</span></div>' : "") + '<div class="bandbig"><b>' + sc + '/' + tot + '</b><span class="muted">' + (wrong ? Math.round(100 * sc / Math.max(1, tot)) + '% correct' + ((p.answeredN || tot) > sc ? " · wrong answers saved to your mistake log" : " · blanks are not logged") : "Perfect score!") + '</span></div>';
     h += '<div class="grid2"><button class="btn ghost" data-act="retryDrill">Try again</button>' + (nextBuiltIn() ? '<button class="btn" data-act="nextBuiltIn">Next exercise</button>' : (aiReady() ? '<button class="btn" data-act="genDrill"' + (ui.busy ? " disabled" : "") + '>Next drill (AI)</button>' : '<button class="btn" data-act="closeDrill">Back to list</button>')) + '</div>';
     return h;
   }
@@ -1446,7 +1552,7 @@
     h += '<label class="field">Show<select data-ch="mfilter"><option value="all">All skills</option>' + ["Listening", "Reading", "Writing", "Speaking", "Vocabulary"].map(function (s) { return '<option' + (s === pr.mfilter ? " selected" : "") + '>' + s + '</option>'; }).join("") + '</select></label>';
     if (!filtered.length) h += '<p class="empty">Mistakes from drills and AI feedback land here automatically, or add your own.</p>';
     filtered.slice(0, pr.mAll ? 200 : 10).forEach(function (x) {
-      h += '<div class="mistake"><div class="row between"><span class="note">' + esc(x.skill) + ' · ' + esc(short(x.date)) + (x.source ? " · " + esc(x.source) : "") + '</span><button class="iconbtn sm" data-act="delMistake" data-id="' + esc(x.id) + '" aria-label="Delete mistake">✕</button></div><span class="o" style="color:var(--bad)">' + esc(x.wrong) + '</span><span style="color:var(--good);font-weight:600">' + esc(x.right) + '</span>' + (x.note ? '<span class="muted small">' + esc(x.note) + '</span>' : "") + '</div>';
+      h += '<div class="mistake"><div class="row between"><span class="note">' + esc(x.skill) + ' · ' + esc(short(x.date)) + (x.source ? " · " + esc(x.source) : "") + '</span><button class="iconbtn sm" data-act="delMistake" data-id="' + esc(x.id) + '" aria-label="Delete mistake">✕</button></div>' + confirmBlock("mistake:" + x.id, "Delete this mistake?") + '<span class="o" style="color:var(--bad)">' + esc(x.wrong) + '</span><span style="color:var(--good);font-weight:600">' + esc(x.right) + '</span>' + (x.note ? '<span class="muted small">' + esc(x.note) + '</span>' : "") + '</div>';
     });
     if (filtered.length > 10 && !pr.mAll) h += '<button class="btn ghost wide" data-act="mAll">Show all (' + filtered.length + ')</button>';
     h += '</section>';
@@ -1474,6 +1580,7 @@
     var lastB = 0; try { lastB = +localStorage.getItem("ielts-last-backup") || 0; } catch (e) {}
     h += '<section class="card"><h2>Backup and offline use</h2>' + (!window.claude ? '<p class="note">' + (persisted === true ? "✓ Storage is protected: the phone won’t clear your progress to free space." : persisted === false ? "Storage isn’t protected yet. Install the app to the home screen so the phone keeps your data." : "") + ' Last backup: ' + (lastB ? Math.round((Date.now() - lastB) / 864e5) + " days ago" : "never") + '.</p>' : "") + (!canSay() || (!TTS && !hasLocalVoice()) ? '<p class="note">Pronunciation offline: install an English voice in your phone settings (Android: Settings → Text-to-speech → Google → Install voice data → English UK).</p>' : "") + '<button class="btn ghost wide" data-act="downloadBackup">Save backup file</button><p class="note">' + (window.claude ? "Your progress saves to your Claude account." : "This offline copy saves on this device only.") + ' To move progress between the Claude version and the offline app, tap Copy backup on one, then Restore on the other. Restoring merges: nothing is lost.</p>' + (installEvt ? '<button class="btn" data-act="installApp">Install as an app</button>' : "") + '<div class="grid2"><button class="btn ghost" data-act="copyBackup">Copy backup</button><button class="btn ghost" data-act="showRestore">Restore from backup</button></div>';
     if (pr.backupText) h += '<textarea rows="4" readonly aria-label="Backup text">' + esc(pr.backupText) + '</textarea><p class="note">Copying was blocked here. Select the text above and copy it yourself.</p>';
+    if (pr.restoring) h += '<p class="note" id="restoreProg">Restoring ' + esc(pr.restoring) + '…</p>';
     if (pr.restore) h += '<label class="btn ghost wide filebtn">Choose backup file (.json)<input type="file" accept=".json,application/json" data-ch="restoreFile" hidden></label><p class="note center">or paste the backup text</p><textarea rows="4" data-in="restoreText" placeholder="Paste a backup here" aria-label="Backup to restore">' + esc(pr.restoreText) + '</textarea><button class="btn" data-act="doRestore">Restore (adds to what you have)</button>';
     return h + '</section>';
   }
@@ -1531,8 +1638,10 @@
       }
     },
     sessSize: function (el) { setSettings({ session: +el.getAttribute("data-v") }); render(); },
-    exLevel: function (el) { setSettings({ exLevel: el.getAttribute("data-v") }); render(); },
+    moreEx: function () { ui.cards.session.more = true; var sc = view.querySelector(".face.back"); var top = sc ? sc.scrollTop : 0; render(); var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
+    exLevel: function (el) { var sc = view.querySelector(".face.back"), top = sc ? sc.scrollTop : 0; ui.noAnim = true; setSettings({ exLevel: el.getAttribute("data-v") }); render(); ui.noAnim = false; var sc2 = view.querySelector(".face.back"); if (sc2) sc2.scrollTop = top; },
     nextBatch: function () { var q = buildQueue(ui.cards.deck); if (!q.length) { ui.cards.mode = "home"; render(); return; } startSession(q); },
+    showMoreCards: function () { ui.cards.showN = (ui.cards.showN || 40) + 50; render(); },
     clearFilters: function () { ui.cards.b = { deck: "all", level: "all", status: "all", pos: "all" }; ui.cards.search = ""; render(); },
     studyFiltered: function () { var ids = filterCards(browseFilter()).map(function (c) { return c.id; }); var s = srs(); ids.sort(function (a, b) { return ((s.cards[a] || {}).due || 0) - ((s.cards[b] || {}).due || 0); }); startSession(ids); },
     drillFiltered: function (el) {
@@ -1629,7 +1738,8 @@
     cardNow: function (el) {
       var id = el.getAttribute("data-id"), s = srs();
       s.cards[id] = Object.assign(s.cards[id] || { ivl: 0, ease: 2.5, reps: 0, lapses: 0 }, { due: Date.now() });
-      saveSrs(s); toast("This card is now due."); render();
+      saveSrs(s); toast("This card is now due.");
+      var row = el.closest("details"); if (row) { var rs = row.querySelector(".rowstat"); if (rs) rs.textContent = "Due now"; } else render();
     },
     cardDel: function (el) {
       var id = el.getAttribute("data-id");
@@ -1695,7 +1805,7 @@
     },
     newEssay: function () {
       var w0 = ui.write;
-      if (w0.text && w0.text.trim() && !w0.savedId && !w0.discardOk) { w0.discardOk = true; toast("This answer isn’t saved. Tap again to discard it, or Save first."); return; }
+      if (w0.text && w0.text.trim() && !w0.savedId && !w0.discardOk) { ui.confirm = { key: "essayNew", run: function () { w0.discardOk = true; ACT.newEssay(); } }; render(); return; }
       w0.discardOk = false;
       var w = ui.write; w.text = ""; w.result = null; w.savedId = null; w.custom = null; if (w.task === 1) w.p1++; else w.pi++; tSet("write", (w.task === 1 ? 20 : 40) * 60, "down"); saveDrafts(); render(); },
     viewEssay: function (el) { ui.write.view = el.getAttribute("data-id"); render(); window.scrollTo(0, 0); },
@@ -1756,15 +1866,35 @@
     },
     saveSpeak: function () {
       var sp = ui.speak;
-      if (textStats(sp.text).words < 5) { toast("Add your answer first."); return; }
+      if (textStats(sp.text).words < 5 && !REC.blob) { toast("Record or type your answer first."); return; }
       var id = sp.savedId || ("s_" + uid());
       put(id, { date: today(), part: sp.part, prompt: speakPrompt(), text: sp.text, seconds: Math.round(speakSecs()), result: sp.result || null });
-      sp.savedId = id; autoTick(["speak"]); toast("Session saved."); render();
+      sp.savedId = id; autoTick(["speak"]);
+      if (REC.blob) { var bl = REC.blob, rs = REC.secs; idb(function (st) { st.put({ blob: bl, secs: rs }, id); }); }
+      toast("Session saved" + (REC.blob ? " with your recording." : ".")); render();
     },
+    recStart: function () {
+      REC.err = "";
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        var mr; try { mr = new MediaRecorder(stream); } catch (e) { REC.err = "Recording failed to start."; render(); return; }
+        REC.rec = mr; REC.chunks = []; REC.state = "recording"; REC.t0 = Date.now(); REC.secs = 0;
+        mr.ondataavailable = function (e) { if (e.data && e.data.size) REC.chunks.push(e.data); };
+        mr.onstop = function () {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          if (REC.url) try { URL.revokeObjectURL(REC.url); } catch (e) {}
+          REC.blob = new Blob(REC.chunks, { type: mr.mimeType || "audio/webm" }); REC.url = URL.createObjectURL(REC.blob); REC.state = "idle";
+          if (ui.tab === "speak") render();
+        };
+        mr.start(1000); REC.timer = setInterval(recTick, 500); render();
+        if (ui.speak.part === 2 && ui.speak.phase !== "talk") toast("Tip: start the 1-minute prep first, then record your 2-minute talk.");
+      }).catch(function () { REC.err = "Microphone access was blocked. Allow the microphone for this site (in the Claude app it may not be available; use the offline app)."; render(); });
+    },
+    recStop: function () { recStop(); },
+    recDel: function () { if (REC.url) try { URL.revokeObjectURL(REC.url); } catch (e) {} REC.url = null; REC.blob = null; REC.secs = 0; render(); },
     newSpeak: function () { var sp = ui.speak; sp.text = ""; sp.notes = ""; sp.result = null; sp.savedId = null; sp.phase = "idle"; sp.partial = ""; tSet("speak", sp.part === 2 ? 60 : 0, sp.part === 2 ? "down" : "up"); saveDrafts(); render(); },
     viewSpeak: function (el) { ui.speak.view = el.getAttribute("data-id"); render(); window.scrollTo(0, 0); },
     closeSpeakView: function () { ui.speak.view = null; render(); },
-    delSpeak: function (el) { var id = el.getAttribute("data-id"); ui.confirm = { key: "speak:" + id, run: function () { del(id); ui.speak.view = null; } }; render(); },
+    delSpeak: function (el) { var id = el.getAttribute("data-id"); ui.confirm = { key: "speak:" + id, run: function () { del(id); idb(function (st) { st.delete(id); }); ui.speak.view = null; } }; render(); },
 
     // practice
     pKind: function (el) { ui.practice.kind = el.getAttribute("data-k"); render(); },
@@ -1781,6 +1911,12 @@
     },
     genDrill: function () { var p = ui.practice; return runDrill(p.kind, p.kind === "reading" ? p.rtype : p.ltype); },
     genWeakest: function () { var p = ui.practice, id = weakestType(p.kind); if (p.kind === "reading") p.rtype = id; else p.ltype = id; return runDrill(p.kind, id); },
+    goMistakes: function () { location.hash = "#progress"; setTimeout(function () { ACT.mQuiz(); var el = view.querySelector('[data-act="mQuizEnd"]') || view.querySelector('.fix'); if (el && el.scrollIntoView) el.scrollIntoView({ block: "center" }); }, 60); },
+    openTest: function (el) {
+      var t = (window.IELTS_TESTS || []).filter(function (x) { return x.id === el.getAttribute("data-id"); })[0]; if (!t) return;
+      loadDrill(testToDrill(t), null); ui.practice.sampleId = t.id;
+    },
+    setPart: function (el) { var p = ui.practice; stopSay(); p.playing = false; p.part = +el.getAttribute("data-n"); if (!p.checked) p.plays = 0; render(); var t = document.getElementById(p.kind === "reading" ? "rPassage" : "rQuestions") || document.querySelector(".parttabs"); if (t && t.scrollIntoView) t.scrollIntoView({ block: "start" }); },
     retryDrill: function () { var p = ui.practice, sid = p.sampleId; loadDrill(p.data, p.bankId); p.sampleId = sid; },
     nextBuiltIn: function () { var x = nextBuiltIn(); if (!x) return; var sid = x.id; loadDrill(x, null); ui.practice.sampleId = sid; },
     closeDrill: function () { var p = ui.practice; p.data = null; stopSay(); render(); window.scrollTo(0, 0); },
@@ -1801,24 +1937,26 @@
       p.checked = true; tPause("practice"); stopSay(); p.playing = false;
       var total = 0, sc = 0;
       groupsOf(d).forEach(function (g, gi) {
-        var gs = 0, qs = g.questions || [];
+        var gs = 0, qs = g.questions || [], gAns = 0;
         qs.forEach(function (q, i) {
           var a = p.answers[gi + "-" + i];
           var blank = Array.isArray(a) ? !a.length : (a == null || String(a).trim() === "");
+          if (!blank) gAns++;
           if (answerOk(q, a, g)) gs++;
           else if (!blank) put("m_" + uid(), { skill: p.kind === "reading" ? "Reading" : "Listening", wrong: (d.title ? d.title + " · " : "") + gapContext(g, i, q) + " → I answered: " + (Array.isArray(a) ? a.join(", ") : (a || "(blank)")), right: ansLabel(q), note: q.explanation || groupTypeName(d, g), date: today(), source: groupTypeName(d, g) });
         });
-        if (qs.length) addDrill({ date: today(), kind: p.kind, type: groupTypeName(d, g), score: gs, total: qs.length });
+        if (gAns) addDrill({ date: today(), kind: p.kind, type: groupTypeName(d, g), score: gs, total: gAns });
         sc += gs; total += qs.length;
       });
       if (p.bankId) markBank(p.bankId, sc);
-      if (p.sampleId) { var ss = Object.assign({}, get("samplescores") || {}); ss[p.sampleId] = sc + "/" + total; put("samplescores", ss); }
+      if (p.data.test) { var tmk = testMarks(d); sc = tmk.got; total = tmk.tot; }
+      if (p.sampleId) { var ss = Object.assign({}, get("samplescores") || {}), prevBest = parseInt(ss[p.sampleId], 10); if (!isNaN(prevBest) && prevBest > sc) { /* keep best */ } else ss[p.sampleId] = sc + "/" + total + (p.data.test ? " · band " + band(rawToBand(p.kind, sc, total)) : ""); put("samplescores", ss); }
       if (answered >= qsAll.length / 2) autoTick(["test"]);
-      p.wrongN = total - sc;
+      p.wrongN = total - sc; p.answeredN = answered;
       render();
     },
     playL: function () {
-      var p = ui.practice, lines = (p.data.lines || []).filter(function (l) { return l.text; });
+      var p = ui.practice, lines = curLines(p.data).filter(function (l) { return l.text; });
       if (!lines.length) return;
       p.playing = true; p.heard = false; tStart("practice"); render();
       var started = Date.now();
@@ -1871,7 +2009,7 @@
       put("m_" + uid(), { skill: mf.skill, wrong: mf.wrong.trim(), right: mf.right.trim(), note: mf.note.trim(), date: today(), source: "" });
       ui.progress.mform = { skill: mf.skill, wrong: "", right: "", note: "" }; toast("Mistake saved."); render();
     },
-    delMistake: function (el) { del(el.getAttribute("data-id")); render(); },
+    delMistake: function (el) { var id = el.getAttribute("data-id"); ui.confirm = { key: "mistake:" + id, run: function () { del(id); } }; render(); },
     mQuiz: function () { var ids = shuffle(docsWithPrefix("m_").map(function (x) { return x.id; })).slice(0, 5); ui.progress.mquiz = { items: ids, i: 0, show: false }; render(); },
     mShow: function () { ui.progress.mquiz.show = true; render(); },
     mNext: function () { var q = ui.progress.mquiz; q.i++; q.show = false; render(); },
@@ -1897,10 +2035,14 @@
       var o; try { o = JSON.parse(ui.progress.restoreText); } catch (e) { toast("That doesn’t look like a backup."); return; }
       if (!o || !o.docs) { toast("That doesn’t look like a backup."); return; }
       var ids = Object.keys(o.docs).filter(function (k) { var m = mergeDoc(k, S.docs[k], o.docs[k]); return m !== null; });
-      var i = 0;
+      var i = 0, gap = window.claude ? 60 : 0;
+      ui.progress.restoring = ids.length ? "0 of " + ids.length : "";
       (function step() {
-        if (i >= ids.length) { toast(ids.length ? "Restored and merged " + ids.length + " items." : "Nothing new in this backup: you’re up to date."); render(); return; }
-        var k = ids[i++]; var m = mergeDoc(k, S.docs[k], o.docs[k]); if (m) put(k, m); setTimeout(step, 120);
+        var batch = gap ? 1 : 200;
+        while (batch-- > 0 && i < ids.length) { var k = ids[i++]; var m = mergeDoc(k, S.docs[k], o.docs[k]); if (m) put(k, m); }
+        if (i >= ids.length) { ui.progress.restoring = ""; toast(ids.length ? "Restored and merged " + ids.length + " items." : "Nothing new in this backup: you’re up to date."); render(); return; }
+        ui.progress.restoring = i + " of " + ids.length; var rp = $("restoreProg"); if (rp) rp.textContent = "Restoring " + ui.progress.restoring + "…";
+        setTimeout(step, gap);
       })();
       ui.progress.restore = false; ui.progress.restoreText = "";
     },
@@ -1961,8 +2103,8 @@
     // only "Again" cards come back in the same session, once each; other learning cards wait for the next session
     sess.rep = sess.rep || {};
     if (q === 0 && !sess.rep[id]) { sess.rep[id] = 1; sess.queue.push(id); }
-    sess.i++; sess.revealed = false; sess.bn = false; sess.check = null; sess.use = "";
-    if (sess.i >= sess.queue.length) autoTick(["vocab", "vocabRead"]);
+    sess.i++; sess.revealed = false; sess.bn = false; sess.more = false; sess.check = null; sess.use = "";
+    if (sess.i >= sess.queue.length && ((s.log[today()] || 0) >= 20 || !buildQueue(ui.cards.deck).length)) autoTick(["vocab", "vocabRead"]);
     render();
     if (autoPlay && sess.i < sess.queue.length) { var nx = cardById(sess.queue[sess.i]); if (nx) say(nx.w); }
   }
@@ -1998,7 +2140,7 @@
     var inp = $("spellInput"); if (inp) inp.focus();
   }
   function startQuiz(pool) {
-    var cards = allCards(); pool = shuffle(pool && pool.length ? pool : defaultPool(10)).slice(0, 10);
+    var lvlCards = filterCards({ level: ui.cards.level || "all" }), cards = lvlCards.length >= 20 ? lvlCards : allCards(); pool = shuffle(pool && pool.length ? pool : defaultPool(10)).slice(0, 10);
     ui.cards.mode = "quiz";
     ui.cards.quiz = {
       i: 0, score: 0, picked: null, items: pool.map(function (c) {
@@ -2059,6 +2201,11 @@
     var fn = ACT[el.getAttribute("data-act")];
     if (fn) { e.preventDefault(); fn(el, e); }
   });
+  view.addEventListener("toggle", function (e) {
+    var d = e.target; if (!d || !d.getAttribute || !d.open) return;
+    var id = d.getAttribute("data-card"); if (!id) return;
+    var body = d.querySelector(".body"); if (body && !body.innerHTML) body.innerHTML = rowBody(id);
+  }, true);
   view.addEventListener("change", function (e) {
     var el = e.target, k = el.getAttribute("data-ch"); if (!k) return;
     var v = el.value;
@@ -2070,7 +2217,7 @@
     else if (k === "deck2") { ui.cards.deck = v; setSettings({ cardDeck: v }); render(); }
     else if (k === "add_topic") ui.cards.add.topic = v;
     else if (k === "add_lvl") ui.cards.add.lvl = v;
-    else if (k.indexOf("b_") === 0) { ui.cards.b[k.slice(2)] = v; ui.cards.showAll = false; render(); }
+    else if (k.indexOf("b_") === 0) { ui.cards.b[k.slice(2)] = v; ui.cards.showN = 40; render(); }
     else if (k === "rtype") { ui.practice.rtype = v; render(); }
     else if (k === "t1kind") { ui.write.t1kind = v; ui.write.p1 = 0; ui.write.custom = null; render(); }
     else if (k === "t2type") { ui.write.t2type = v; ui.write.pi = 0; ui.write.custom = null; render(); }
@@ -2083,7 +2230,7 @@
     else if (k === "mfilter") { ui.progress.mfilter = v; ui.progress.mAll = false; render(); }
     else if (k === "restoreFile") {
       var f = el.files && el.files[0]; if (!f) return;
-      var rd = new FileReader(); rd.onload = function () { ui.progress.restoreText = String(rd.result || ""); ACT.doRestore(); }; rd.readAsText(f);
+      var rd = new FileReader(); rd.onload = function () { ui.progress.restoreText = String(rd.result || ""); el.value = ""; ACT.doRestore(); }; rd.readAsText(f);
     }
     else if (k === "ai_provider") { ui.progress.ai = ui.progress.ai || {}; ui.progress.ai.provider = v; render(); }
     else if (k === "set_holiday") { setSettings({ holiday: +v }); render(); }
@@ -2100,7 +2247,10 @@
     if (k === "essay") { ui.write.text = v; saveDrafts(); var st = $("essayStats"); if (st) st.innerHTML = statsHtml(v, ui.write.task); }
     else if (k === "speakText") { ui.speak.text = v; saveDrafts(); var ss = $("speakStats"); if (ss) ss.innerHTML = speakStatsHtml(textStats(v), speakSecs()); }
     else if (k === "notes") ui.speak.notes = v;
-    else if (k === "cardSearch") { ui.cards.search = v; var pos = el.selectionStart; render(); var ni = view.querySelector('[data-in="cardSearch"]'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (x) {} } }
+    else if (k === "cardSearch") {
+      ui.cards.search = v; ui.cards.showN = 40; clearTimeout(ui.cards.searchT);
+      ui.cards.searchT = setTimeout(function () { var cur = view.querySelector('[data-in="cardSearch"]'), pos = cur ? cur.selectionStart : 0; render(); var ni = view.querySelector('[data-in="cardSearch"]'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (x) {} } }, 220);
+    }
     else if (k.indexOf("add_") === 0) { var was = !!(ui.cards.add.w || ui.cards.add.def); ui.cards.add[k.slice(4)] = v; if (k === "add_w" && !was && v) { render(); var ai2 = view.querySelector('[data-in="add_w"]'); if (ai2) { ai2.focus(); ai2.setSelectionRange(v.length, v.length); } } }
     else if (k === "useIt") ui.cards.session.use = v;
     else if (k === "spell") ui.cards.spell.input = v;
@@ -2175,6 +2325,7 @@
   function route() {
     var h = (location.hash || "").replace("#", "");
     ui.tab = TABS.indexOf(h) !== -1 ? h : "today";
+    try { var tt = $("toast"); if (tt) tt.hidden = true; } catch (e) {}
     ui.confirm = null;
     render();
     window.scrollTo(0, 0);

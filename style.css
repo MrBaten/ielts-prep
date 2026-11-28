@@ -1,3 +1,8 @@
+@font-face { font-family: "Manrope"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/manrope-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/manrope-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/manrope-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/manrope-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/fraunces-latin-600-normal.woff2") format("woff2"); }
 /* Layout: one narrow phone-first column; a fixed bottom tab bar switches between six study areas. */
 :root {
   --bg: #f3f5f3;
@@ -465,3 +470,46 @@ summary .cefr + .lvl { margin-left: 6px; }
 }
 .lvlseg button b { font-size: 12.5px; overflow-wrap: anywhere; }
 .exlist .iconbtn, .exlist button.speak { min-width: 34px; min-height: 34px; width: 34px; height: 34px; }
+
+/* v5: desktop layout (left rail, wider content, two-column grids) */
+@media (min-width: 1000px) {
+  .wrap { max-width: 1060px; padding: 24px 32px 48px 132px; }
+  .tabbar { top: 0; bottom: 0; right: auto; width: 100px; border-top: 0; border-right: 1px solid var(--line); padding: 16px 0; }
+  .tabbar .inner { display: flex; flex-direction: column; gap: 4px; max-width: none; }
+  .tabbar a { padding: 12px 4px; font-size: 12px; border-radius: 12px; margin: 0 8px; }
+  .tabbar a:hover { background: var(--surface-2); }
+  .tabbar a[aria-current="page"] { background: var(--accent-soft); }
+  .tabbar a[aria-current="page"]::before { top: 20%; bottom: 20%; left: -8px; right: auto; width: 3px; height: auto; border-radius: 0 3px 3px 0; }
+  .tabbar .badge { right: 18px; }
+  .toast { bottom: 24px !important; left: calc(50% + 50px); }
+  #view { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+  #view > * { grid-column: 1 / -1; }
+  #view > .card.half { grid-column: auto; }
+  .modes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .exgrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .lvlseg button b { font-size: 14px; }
+}
+/* v5: recorder, tests */
+.recbox { display: grid; gap: 8px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 12px; }
+.recbox audio { width: 100%; }
+.recdot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--bad); margin-right: 6px; animation: recblink 1s infinite; }
+@keyframes recblink { 50% { opacity: .2; } }
+.selfcheck { display: grid; gap: 6px; }
+.parttabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
+.parttabs button { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); font-weight: 700; color: var(--ink); }
+.parttabs button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.parttabs button span { display: block; font-size: 11px; font-weight: 500; color: var(--muted); }
+.testlist { display: grid; gap: 8px; }
+@media (min-width: 1000px) { .jumpbar .btn:not(:last-child) { display: none; } .jumpbar { justify-content: flex-end; } }
+
+/* v5b: re-audit fixes */
+.toast { pointer-events: none; }
+#rPassage, #rQuestions { scroll-margin-top: 64px; }
+.jumpbar { align-items: center; }
+.jumpbar .jt { flex: 0 0 auto; font-size: 18px; padding: 0 6px; min-width: 64px; text-align: center; }
+.seg button, .seg.small button { min-height: 44px; }
+.exlist li .iconbtn, .exlist li .speak { transform: none; }
+.lvlseg button b { overflow-wrap: normal; hyphens: manual; }
+.flipwrap.noanim { animation: none !important; }
+.bn.small { font-size: 14px; color: var(--muted); }
+@media (min-width: 1000px) { .readgrid #rPassage { top: 64px; } }
