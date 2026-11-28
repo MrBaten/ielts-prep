@@ -11,7 +11,7 @@
   --accent-soft: #e1f1e8;
   --partial: #9fcfb6;
   --good: #1b7a53;
-  --warn: #a8661a;
+  --warn: #8f5512;
   --bad: #b3402f;
   --warn-soft: #fbefdf;
   --bad-soft: #f8e4e0;
@@ -92,7 +92,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .speak { width: 32px; height: 32px; border-radius: 999px; }
 .textbtn { border: 0; background: none; color: var(--accent); font-weight: 700; padding: 4px 0; font-size: 14px; }
 label.field { display: grid; gap: 4px; font-size: 13.5px; font-weight: 600; }
-input[type=text], input[type=number], input[type=date], select, textarea {
+input[type=text], input[type=number], input[type=date], input[type=password], input:not([type]), select, textarea {
   font: inherit; font-size: 15px; color: var(--ink); background: var(--surface);
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; width: 100%; min-width: 0;
 }
@@ -420,3 +420,48 @@ summary .cefr + .lvl { margin-left: 6px; }
 .outline .trh { font-weight: 700; }
 .outline .trow .frow:last-child { border-bottom: 0; padding-bottom: 0; }
 .gapin { white-space: normal; flex-wrap: nowrap; }
+
+/* v4: sentence levels, session size */
+.seg.small { display: inline-flex; width: auto; gap: 2px; padding: 2px; }
+.seg.small button { min-height: 34px; padding: 4px 12px; font-size: 13px; }
+.exlist .sk { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border-radius: 5px; padding: 1px 5px; margin-right: 6px; vertical-align: 1px; }
+.exlist .sk.b { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
+.exlist .sk.a { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
+.exgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.exbtn { display: grid; gap: 4px; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); min-height: 88px; }
+.exbtn span:not(.chip) { font-size: 13px; color: var(--muted); line-height: 1.3; }
+.exbtn .chip { justify-self: start; }
+.exbtn.done { border-color: var(--accent); }
+
+/* v4: audit fixes */
+.filters { gap: 10px; }
+.lvlseg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 3px; background: var(--surface-2); border-radius: 14px; }
+.lvlseg button { display: grid; gap: 1px; border: 0; background: transparent; color: var(--ink); border-radius: 11px; padding: 8px 2px; min-height: 52px; font-size: 13px; }
+.lvlseg button span { font-size: 10.5px; color: var(--muted); }
+.lvlseg button[aria-pressed="true"] { background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.12); color: var(--accent); }
+.choice { min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; align-items: center; background: var(--surface); }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.choice input { margin-top: 0; width: 18px; height: 18px; flex: none; }
+.gapin select.inl { min-height: 40px; min-width: 64px; }
+.gapin input.inl { min-height: 40px; }
+.btn.small { min-height: 44px; }
+.iconbtn { min-width: 44px; min-height: 44px; }
+.iconbtn.sm { min-width: 40px; min-height: 40px; }
+.textbtn { min-height: 44px; padding: 10px 0; }
+.wordlist summary { min-height: 44px; display: flex; align-items: center; gap: 6px; }
+.note.block { white-space: normal; }
+.toast { bottom: calc(76px + env(safe-area-inset-bottom)) !important; top: auto !important; }
+.jumpbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; padding: 6px 0; background: var(--bg); }
+.jumpbar .btn { flex: 1; }
+.jumpbar .btn:last-child { flex: 0 0 48px; }
+.readgrid { display: grid; gap: 14px; }
+.wtimerbar { position: sticky; top: 0; z-index: 4; background: var(--surface); padding: 4px 0; }
+.filebtn { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+@media (hover: none) { .kbd { display: none; } }
+@media (min-width: 1000px) {
+  .readgrid { grid-template-columns: 1fr 1fr; align-items: start; }
+  .readgrid #rPassage { position: sticky; top: 8px; max-height: calc(100vh - 100px); overflow: auto; }
+  .deckbar { flex-wrap: wrap; }
+}
+.lvlseg button b { font-size: 12.5px; overflow-wrap: anywhere; }
+.exlist .iconbtn, .exlist button.speak { min-width: 34px; min-height: 34px; width: 34px; height: 34px; }
